@@ -4,6 +4,8 @@
 
 using System;
 using System.ComponentModel;
+using System.Drawing;
+using System.Threading;
 using System.Windows.Forms;
 using Gma.System.MouseKeyHook;
 
@@ -12,7 +14,6 @@ namespace Demo
     public partial class Main : Form
     {
         private IKeyboardMouseEvents m_Events;
-        private bool bAutoFire = false;
         private bool b6key = true;
 
         public Main()
@@ -66,15 +67,16 @@ namespace Demo
             // q代表键盘1方向，e代表键盘3方向
             if (b6key)
             {
-                 if (e.KeyCode == Keys.Q)
+                if (e.KeyCode == Keys.Q)
                 {
                     SendKeys.SendWait("(as)");
-                }else if (e.KeyCode == Keys.E)
+                }
+                else if (e.KeyCode == Keys.E)
                 {
                     SendKeys.SendWait("(ds)");
                 }
             }
-            }
+        }
 
         private void OnKeyUp(object sender, KeyEventArgs e)
         {
@@ -156,6 +158,24 @@ namespace Demo
         private void clearLog_Click(object sender, EventArgs e)
         {
             textBoxLog.Clear();
+        }
+
+        /// <summary>
+        /// 加双击托盘图标的处理程序。
+        /// 双击的时候，切换显示隐藏。
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
+        private void notifyIcon1_MouseDoubleClick(object sender, MouseEventArgs e)
+        {
+            if (this.Visible == true)
+            {
+                this.Visible = false;
+            }
+            else
+            {
+                this.Visible = true;
+            }
         }
 
         private void Main_Load(object sender, EventArgs e)

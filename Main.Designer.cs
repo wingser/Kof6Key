@@ -30,6 +30,7 @@ namespace Demo
         /// </summary>
         private void InitializeComponent()
         {
+            components = new System.ComponentModel.Container();
             System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(Main));
             radioGlobal = new RadioButton();
             textBoxLog = new TextBox();
@@ -37,6 +38,7 @@ namespace Demo
             label1 = new Label();
             clearLogButton = new Button();
             radioNone = new RadioButton();
+            notifyIcon1 = new NotifyIcon(components);
             groupBox2.SuspendLayout();
             SuspendLayout();
             // 
@@ -126,6 +128,13 @@ namespace Demo
             radioNone.UseVisualStyleBackColor = false;
             radioNone.CheckedChanged += radioNone_CheckedChanged;
             // 
+            // notifyIcon1
+            // 
+            notifyIcon1.Icon = (System.Drawing.Icon)resources.GetObject("notifyIcon1.Icon");
+            notifyIcon1.Text = "6键键盘";
+            notifyIcon1.Visible = true;
+            notifyIcon1.MouseDoubleClick += notifyIcon1_MouseDoubleClick;
+            // 
             // Main
             // 
             AutoScaleDimensions = new System.Drawing.SizeF(9F, 20F);
@@ -154,6 +163,7 @@ namespace Demo
         private System.Windows.Forms.RadioButton radioNone;
         private System.Windows.Forms.Button clearLogButton;
         private System.Windows.Forms.Label label1;
+        private NotifyIcon notifyIcon1;
     }
 }
 
