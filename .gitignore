@@ -1,0 +1,19 @@
+# Visual Studio local state
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build outputs
+bin/
+obj/
+dist/
+
+# Debug symbols and logs
+*.pdb
+*.log
+
+# OS junk
+Thumbs.db
+Desktop.ini

@@ -1,186 +1,402 @@
-﻿// This code is distributed under MIT license. 
-// Copyright (c) 2015 George Mamaladze
-// See license.txt or https://mit-license.org/
-
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
-using System.Threading;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
-using Gma.System.MouseKeyHook;
 
 namespace Demo
 {
     public partial class Main : Form
     {
-        private IKeyboardMouseEvents m_Events;
-        private bool b6key = true;
+        private readonly GlobalKeyboardHook keyboardHook;
+        private readonly Dictionary<Keys, int> injectedKeyRefCounts = new Dictionary<Keys, int>();
+        private readonly Dictionary<Keys, ushort> scanCodeCache = new Dictionary<Keys, ushort>();
+        private Icon baseAppIcon;
+        private Icon enabledTrayIcon;
+        private Icon disabledTrayIcon;
+        private bool isMappingEnabled = true;
+        private bool qHeld;
+        private bool eHeld;
+        private bool sendFailureLogged;
+        private bool startHidden = true;
 
         public Main()
         {
             InitializeComponent();
-            radioGlobal.Checked = true;
-            SubscribeGlobal();
+
+            baseAppIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            if (baseAppIcon != null)
+            {
+                Icon = baseAppIcon;
+            }
+
+            keyboardHook = new GlobalKeyboardHook();
+            keyboardHook.KeyboardPressed += KeyboardHook_KeyboardPressed;
+            keyboardHook.HookError += KeyboardHook_HookError;
+
+            UpdateStatusLabel();
+
             FormClosing += Main_Closing;
-        }
-
-        private void Main_Closing(object sender, CancelEventArgs e)
-        {
-            Unsubscribe();
-        }
-
-        private void SubscribeApplication()
-        {
-            Unsubscribe();
-            Subscribe(Hook.AppEvents());
-        }
-
-        private void SubscribeGlobal()
-        {
-            Unsubscribe();
-            Subscribe(Hook.GlobalEvents());
-        }
-
-        private void Subscribe(IKeyboardMouseEvents events)
-        {
-            m_Events = events;
-            m_Events.KeyDown += OnKeyDown;
-            m_Events.KeyUp += OnKeyUp;
-            m_Events.KeyPress += HookManager_KeyPress;
-        }
-
-        private void Unsubscribe()
-        {
-            if (m_Events == null) return;
-            m_Events.KeyDown -= OnKeyDown;
-            m_Events.KeyUp -= OnKeyUp;
-            m_Events.KeyPress -= HookManager_KeyPress;
-
-            m_Events.Dispose();
-            m_Events = null;
-        }
-
-        private void OnKeyDown(object sender, KeyEventArgs e)
-        {
-            Log(string.Format("KeyDown  \t\t {0}\n", e.KeyCode));
-
-            // q代表键盘1方向，e代表键盘3方向
-            if (b6key)
-            {
-                if (e.KeyCode == Keys.Q)
-                {
-                    SendKeys.SendWait("(as)");
-                }
-                else if (e.KeyCode == Keys.E)
-                {
-                    SendKeys.SendWait("(ds)");
-                }
-            }
-        }
-
-        private void OnKeyUp(object sender, KeyEventArgs e)
-        {
-            Log(string.Format("KeyUp  \t\t\t {0}\n", e.KeyCode));
-
-            // 处理热键开关，当发现弹起→按键的时候，切换生效状态。
-            if (e.KeyCode == Keys.Right)
-            {
-                if (b6key)
-                {
-                    Log("关闭6键");
-                    radioGlobal.Checked = false;
-                    radioNone.Checked = true;
-                    b6key = false;
-                }
-                else
-                {
-                    Log("开启6键");
-                    radioGlobal.Checked = true;
-                    radioNone.Checked = false;
-                    b6key = true;
-                }
-            }
-
-            // pause热键改为显示隐藏程序
-            if (e.KeyCode == Keys.Pause)
-            {
-                if (this.Visible == true)
-                {
-                    this.Visible = false;
-                }
-                else
-                {
-                    this.Visible = true;
-                }
-            }
-        }
-
-        private void HookManager_KeyPress(object sender, KeyPressEventArgs e)
-        {
-            Log(string.Format("KeyPress \t\t\t {0}\n", e.KeyChar));
-            // 长按连击，只处理UI按键，并且开启了长按连击，因为模拟按键也有键盘事件，会有死循环。后面想办法处理
-            /*
-             * 
-            if(bAutoFire)
-            {
-                Thread.Sleep(10);
-                if (e.KeyChar == 'u')
-                { 
-                    SendKeys.SendWait("{u}");
-                }else if (e.KeyChar == 'i')
-                {
-                    SendKeys.SendWait("{i}");
-                }
-            }
-            */
-        }
-
-        private void Log(string text)
-        {
-            if (IsDisposed) return;
-            textBoxLog.AppendText(text);
-            textBoxLog.AppendText(Environment.NewLine);
-            textBoxLog.ScrollToCaret();
-        }
-
-        private void radioGlobal_CheckedChanged(object sender, EventArgs e)
-        {
-            //if (((RadioButton)sender).Checked) SubscribeGlobal();
-            if (((RadioButton)sender).Checked) b6key = true;
-        }
-
-        private void radioNone_CheckedChanged(object sender, EventArgs e)
-        {
-            // if (((RadioButton)sender).Checked) Unsubscribe();
-            if (((RadioButton)sender).Checked) b6key = false;
-        }
-
-        private void clearLog_Click(object sender, EventArgs e)
-        {
-            textBoxLog.Clear();
-        }
-
-        /// <summary>
-        /// 加双击托盘图标的处理程序。
-        /// 双击的时候，切换显示隐藏。
-        /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="e"></param>
-        private void notifyIcon1_MouseDoubleClick(object sender, MouseEventArgs e)
-        {
-            if (this.Visible == true)
-            {
-                this.Visible = false;
-            }
-            else
-            {
-                this.Visible = true;
-            }
         }
 
         private void Main_Load(object sender, EventArgs e)
         {
-            SubscribeGlobal();
         }
+
+        private void Main_Shown(object sender, EventArgs e)
+        {
+            if (startHidden)
+            {
+                startHidden = false;
+                HideToTray();
+            }
+        }
+
+        private void Main_Closing(object sender, CancelEventArgs e)
+        {
+            ReleaseAllInjectedKeys();
+            keyboardHook.HookError -= KeyboardHook_HookError;
+            keyboardHook.Dispose();
+            notifyIcon1.Visible = false;
+            DisposeTrayIcons();
+        }
+
+        private void KeyboardHook_HookError(object sender, Exception e)
+        {
+            BeginInvoke(new Action(() =>
+            {
+                if (sendFailureLogged)
+                {
+                    return;
+                }
+
+                sendFailureLogged = true;
+                SetMappingEnabled(false, "Hook processing failed");
+            }));
+        }
+
+        private void KeyboardHook_KeyboardPressed(object sender, GlobalKeyboardHookEventArgs e)
+        {
+            if (e.IsInjected)
+            {
+                return;
+            }
+
+            if (HandleHotkeys(e))
+            {
+                e.Handled = true;
+                return;
+            }
+
+            if (!isMappingEnabled)
+            {
+                return;
+            }
+
+            if (e.KeyCode == Keys.Q)
+            {
+                e.Handled = true;
+                HandleComboKey(ref qHeld, e.IsKeyDown, Keys.A, Keys.S, "Q");
+                return;
+            }
+
+            if (e.KeyCode == Keys.E)
+            {
+                e.Handled = true;
+                HandleComboKey(ref eHeld, e.IsKeyDown, Keys.D, Keys.S, "E");
+            }
+        }
+
+        private bool HandleHotkeys(GlobalKeyboardHookEventArgs e)
+        {
+            if (!e.IsKeyUp)
+            {
+                return false;
+            }
+
+            switch (e.KeyCode)
+            {
+                case Keys.Right:
+                    SetMappingEnabled(!isMappingEnabled, "Right Arrow toggled mapping");
+                    return true;
+                case Keys.Pause:
+                    ToggleVisibility();
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private void HandleComboKey(ref bool isHeld, bool isKeyDown, Keys firstKey, Keys secondKey, string sourceKeyName)
+        {
+            if (isKeyDown)
+            {
+                if (isHeld)
+                {
+                    return;
+                }
+
+                isHeld = true;
+                if (!PressInjectedKey(firstKey))
+                {
+                    isHeld = false;
+                    return;
+                }
+
+                if (!PressInjectedKey(secondKey))
+                {
+                    ReleaseInjectedKey(firstKey);
+                    isHeld = false;
+                    return;
+                }
+
+                return;
+            }
+
+            if (!isHeld)
+            {
+                return;
+            }
+
+            isHeld = false;
+            ReleaseInjectedKey(firstKey);
+            ReleaseInjectedKey(secondKey);
+        }
+
+        private bool PressInjectedKey(Keys key)
+        {
+            var count = GetInjectedKeyCount(key);
+            injectedKeyRefCounts[key] = count + 1;
+            if (count == 0)
+            {
+                if (!TrySendKeyboardInput(key, false))
+                {
+                    injectedKeyRefCounts.Remove(key);
+                    DisableMappingAfterSendFailure(key, false);
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private void ReleaseInjectedKey(Keys key)
+        {
+            var count = GetInjectedKeyCount(key);
+            if (count <= 0)
+            {
+                return;
+            }
+
+            if (count == 1)
+            {
+                injectedKeyRefCounts.Remove(key);
+                if (!TrySendKeyboardInput(key, true))
+                {
+                    DisableMappingAfterSendFailure(key, true);
+                }
+                return;
+            }
+
+            injectedKeyRefCounts[key] = count - 1;
+        }
+
+        private int GetInjectedKeyCount(Keys key)
+        {
+            int count;
+            return injectedKeyRefCounts.TryGetValue(key, out count) ? count : 0;
+        }
+
+        private void ReleaseAllInjectedKeys()
+        {
+            foreach (var key in new List<Keys>(injectedKeyRefCounts.Keys))
+            {
+                TrySendKeyboardInput(key, true);
+            }
+
+            injectedKeyRefCounts.Clear();
+            qHeld = false;
+            eHeld = false;
+        }
+
+        private bool TrySendKeyboardInput(Keys key, bool keyUp)
+        {
+            ushort scanCode;
+            if (!TryGetScanCode(key, out scanCode))
+            {
+                return false;
+            }
+            var flags = keyUp ? KeyeventfKeyup : 0u;
+            keybd_event((byte)key, (byte)scanCode, flags, InjectionMarker);
+            return true;
+        }
+
+        private bool TryGetScanCode(Keys key, out ushort scanCode)
+        {
+            if (scanCodeCache.TryGetValue(key, out scanCode))
+            {
+                return scanCode != 0;
+            }
+
+            scanCode = (ushort)MapVirtualKey((uint)key, MapvkVkToVsc);
+            scanCodeCache[key] = scanCode;
+            return scanCode != 0;
+        }
+
+        private void DisableMappingAfterSendFailure(Keys key, bool keyUp)
+        {
+            if (sendFailureLogged)
+            {
+                return;
+            }
+
+            sendFailureLogged = true;
+            SetMappingEnabled(false, "Low-level send failed");
+        }
+
+        private void SetMappingEnabled(bool enabled, string reason)
+        {
+            if (isMappingEnabled == enabled)
+            {
+                return;
+            }
+
+            isMappingEnabled = enabled;
+
+            if (!enabled)
+            {
+                ReleaseAllInjectedKeys();
+            }
+
+            UpdateStatusLabel();
+        }
+
+        private void UpdateStatusLabel()
+        {
+            statusLabel.Text = isMappingEnabled ? "Enabled" : "Disabled";
+            statusLabel.BackColor = isMappingEnabled ? Color.FromArgb(220, 252, 231) : Color.FromArgb(254, 226, 226);
+            statusLabel.ForeColor = isMappingEnabled ? Color.FromArgb(22, 101, 52) : Color.FromArgb(153, 27, 27);
+            UpdateTrayIcon();
+        }
+
+        private void ToggleVisibility()
+        {
+            Visible = !Visible;
+            if (Visible)
+            {
+                ShowFromTray();
+            }
+            else
+            {
+                HideToTray();
+            }
+        }
+
+        private void notifyIcon1_MouseDoubleClick(object sender, MouseEventArgs e)
+        {
+            ToggleVisibility();
+        }
+
+        private void UpdateTrayIcon()
+        {
+            EnsureTrayIcons();
+            notifyIcon1.Icon = isMappingEnabled ? enabledTrayIcon : disabledTrayIcon;
+        }
+
+        private void EnsureTrayIcons()
+        {
+            if (baseAppIcon == null)
+            {
+                return;
+            }
+
+            if (enabledTrayIcon == null)
+            {
+                enabledTrayIcon = CreateStatusTrayIcon(baseAppIcon, Color.FromArgb(34, 197, 94));
+            }
+
+            if (disabledTrayIcon == null)
+            {
+                disabledTrayIcon = CreateStatusTrayIcon(baseAppIcon, Color.FromArgb(239, 68, 68));
+            }
+        }
+
+        private static Icon CreateStatusTrayIcon(Icon sourceIcon, Color dotColor)
+        {
+            using (var bitmap = sourceIcon.ToBitmap())
+            using (var graphics = Graphics.FromImage(bitmap))
+            using (var brush = new SolidBrush(dotColor))
+            using (var pen = new Pen(Color.White, 1.5f))
+            {
+                graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+                const int dotSize = 9;
+                var dotBounds = new Rectangle(bitmap.Width - dotSize - 1, bitmap.Height - dotSize - 1, dotSize, dotSize);
+                graphics.FillEllipse(brush, dotBounds);
+                graphics.DrawEllipse(pen, dotBounds);
+
+                var iconHandle = bitmap.GetHicon();
+                try
+                {
+                    return Icon.FromHandle(iconHandle).Clone() as Icon;
+                }
+                finally
+                {
+                    DestroyIcon(iconHandle);
+                }
+            }
+        }
+
+        private void HideToTray()
+        {
+            ShowInTaskbar = false;
+            WindowState = FormWindowState.Minimized;
+            Hide();
+        }
+
+        private void ShowFromTray()
+        {
+            ShowInTaskbar = true;
+            Show();
+            WindowState = FormWindowState.Normal;
+            Activate();
+        }
+
+        private void DisposeTrayIcons()
+        {
+            if (enabledTrayIcon != null)
+            {
+                enabledTrayIcon.Dispose();
+                enabledTrayIcon = null;
+            }
+
+            if (disabledTrayIcon != null)
+            {
+                disabledTrayIcon.Dispose();
+                disabledTrayIcon = null;
+            }
+
+            if (baseAppIcon != null)
+            {
+                baseAppIcon.Dispose();
+                baseAppIcon = null;
+            }
+        }
+
+        private const uint KeyeventfKeyup = 0x0002;
+        private const uint MapvkVkToVsc = 0;
+        private static readonly IntPtr InjectionMarker = new IntPtr(unchecked((int)0x4B364B36));
+
+        [DllImport("user32.dll")]
+        private static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, IntPtr dwExtraInfo);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DestroyIcon(IntPtr hIcon);
+
     }
 }

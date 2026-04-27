@@ -1,0 +1,33 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build project
+        shell: powershell
+        run: .\build.ps1
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kof6key-windows
+          path: |
+            dist\kof6key.exe
+            dist\kof6key.pdb
+          if-no-files-found: error
