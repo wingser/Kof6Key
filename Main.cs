@@ -9,16 +9,39 @@ namespace Demo
 {
     public partial class Main : Form
     {
+        private sealed class ComboBindingState
+        {
+            public ComboBindingState(Keys sourceKey, Keys firstKey, Keys secondKey)
+            {
+                SourceKey = sourceKey;
+                FirstKey = firstKey;
+                SecondKey = secondKey;
+            }
+
+            public Keys SourceKey { get; private set; }
+
+            public Keys FirstKey { get; private set; }
+
+            public Keys SecondKey { get; private set; }
+
+            public bool IsHeld { get; set; }
+        }
+
         private readonly GlobalKeyboardHook keyboardHook;
+        private readonly ComboBindingState qBinding = new ComboBindingState(Keys.Q, Keys.A, Keys.S);
+        private readonly ComboBindingState eBinding = new ComboBindingState(Keys.E, Keys.D, Keys.S);
+        private readonly Timer qSecondKeyTimer;
+        private readonly Timer eSecondKeyTimer;
+        private readonly Timer recoveryTimer;
+        private readonly Random random = new Random();
         private readonly Dictionary<Keys, int> injectedKeyRefCounts = new Dictionary<Keys, int>();
         private readonly Dictionary<Keys, ushort> scanCodeCache = new Dictionary<Keys, ushort>();
         private Icon baseAppIcon;
         private Icon enabledTrayIcon;
         private Icon disabledTrayIcon;
         private bool isMappingEnabled = true;
-        private bool qHeld;
-        private bool eHeld;
         private bool sendFailureLogged;
+        private bool hookFailureLogged;
         private bool startHidden = true;
 
         public Main()
@@ -34,6 +57,13 @@ namespace Demo
             keyboardHook = new GlobalKeyboardHook();
             keyboardHook.KeyboardPressed += KeyboardHook_KeyboardPressed;
             keyboardHook.HookError += KeyboardHook_HookError;
+
+            qSecondKeyTimer = CreateSecondKeyTimer(qBinding);
+            eSecondKeyTimer = CreateSecondKeyTimer(eBinding);
+            recoveryTimer = new Timer();
+            recoveryTimer.Interval = RecoveryTimerIntervalMilliseconds;
+            recoveryTimer.Tick += RecoveryTimer_Tick;
+            recoveryTimer.Start();
 
             UpdateStatusLabel();
 
@@ -55,25 +85,31 @@ namespace Demo
 
         private void Main_Closing(object sender, CancelEventArgs e)
         {
+            recoveryTimer.Stop();
+            qSecondKeyTimer.Stop();
+            eSecondKeyTimer.Stop();
             ReleaseAllInjectedKeys();
             keyboardHook.HookError -= KeyboardHook_HookError;
             keyboardHook.Dispose();
+            recoveryTimer.Dispose();
+            qSecondKeyTimer.Dispose();
+            eSecondKeyTimer.Dispose();
             notifyIcon1.Visible = false;
             DisposeTrayIcons();
         }
 
         private void KeyboardHook_HookError(object sender, Exception e)
         {
-            BeginInvoke(new Action(() =>
+            RunOnUiThread(() =>
             {
-                if (sendFailureLogged)
+                if (hookFailureLogged)
                 {
                     return;
                 }
 
-                sendFailureLogged = true;
-                SetMappingEnabled(false, "Hook processing failed");
-            }));
+                hookFailureLogged = true;
+                ReleaseAllInjectedKeys();
+            });
         }
 
         private void KeyboardHook_KeyboardPressed(object sender, GlobalKeyboardHookEventArgs e)
@@ -81,6 +117,11 @@ namespace Demo
             if (e.IsInjected)
             {
                 return;
+            }
+
+            if (e.IsKeyDown)
+            {
+                RecoverStaleComboStates();
             }
 
             if (HandleHotkeys(e))
@@ -97,14 +138,14 @@ namespace Demo
             if (e.KeyCode == Keys.Q)
             {
                 e.Handled = true;
-                HandleComboKey(ref qHeld, e.IsKeyDown, Keys.A, Keys.S, "Q");
+                HandleComboKey(qBinding, qSecondKeyTimer, e.IsKeyDown);
                 return;
             }
 
             if (e.KeyCode == Keys.E)
             {
                 e.Handled = true;
-                HandleComboKey(ref eHeld, e.IsKeyDown, Keys.D, Keys.S, "E");
+                HandleComboKey(eBinding, eSecondKeyTimer, e.IsKeyDown);
             }
         }
 
@@ -128,40 +169,39 @@ namespace Demo
             }
         }
 
-        private void HandleComboKey(ref bool isHeld, bool isKeyDown, Keys firstKey, Keys secondKey, string sourceKeyName)
+        private void HandleComboKey(ComboBindingState binding, Timer secondKeyTimer, bool isKeyDown)
         {
+            hookFailureLogged = false;
+
             if (isKeyDown)
             {
-                if (isHeld)
+                if (binding.IsHeld)
                 {
                     return;
                 }
 
-                isHeld = true;
-                if (!PressInjectedKey(firstKey))
+                binding.IsHeld = true;
+                if (!PressInjectedKey(binding.FirstKey))
                 {
-                    isHeld = false;
+                    binding.IsHeld = false;
                     return;
                 }
 
-                if (!PressInjectedKey(secondKey))
-                {
-                    ReleaseInjectedKey(firstKey);
-                    isHeld = false;
-                    return;
-                }
-
+                secondKeyTimer.Stop();
+                secondKeyTimer.Interval = GetRandomComboKeyDelayMilliseconds();
+                secondKeyTimer.Start();
                 return;
             }
 
-            if (!isHeld)
+            if (!binding.IsHeld)
             {
                 return;
             }
 
-            isHeld = false;
-            ReleaseInjectedKey(firstKey);
-            ReleaseInjectedKey(secondKey);
+            binding.IsHeld = false;
+            secondKeyTimer.Stop();
+            ReleaseInjectedKey(binding.FirstKey);
+            ReleaseInjectedKey(binding.SecondKey);
         }
 
         private bool PressInjectedKey(Keys key)
@@ -210,14 +250,38 @@ namespace Demo
 
         private void ReleaseAllInjectedKeys()
         {
+            qBinding.IsHeld = false;
+            eBinding.IsHeld = false;
+            qSecondKeyTimer.Stop();
+            eSecondKeyTimer.Stop();
+
             foreach (var key in new List<Keys>(injectedKeyRefCounts.Keys))
             {
                 TrySendKeyboardInput(key, true);
             }
 
             injectedKeyRefCounts.Clear();
-            qHeld = false;
-            eHeld = false;
+        }
+
+        private bool RecoverStaleComboStates()
+        {
+            var recoveredQ = RecoverStaleComboState(qBinding, qSecondKeyTimer);
+            var recoveredE = RecoverStaleComboState(eBinding, eSecondKeyTimer);
+            return recoveredQ || recoveredE;
+        }
+
+        private bool RecoverStaleComboState(ComboBindingState binding, Timer secondKeyTimer)
+        {
+            if (!binding.IsHeld || IsPhysicalKeyDown(binding.SourceKey))
+            {
+                return false;
+            }
+
+            binding.IsHeld = false;
+            secondKeyTimer.Stop();
+            ReleaseInjectedKey(binding.FirstKey);
+            ReleaseInjectedKey(binding.SecondKey);
+            return true;
         }
 
         private bool TrySendKeyboardInput(Keys key, bool keyUp)
@@ -257,6 +321,12 @@ namespace Demo
 
         private void SetMappingEnabled(bool enabled, string reason)
         {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<bool, string>(SetMappingEnabled), enabled, reason);
+                return;
+            }
+
             if (isMappingEnabled == enabled)
             {
                 return;
@@ -282,6 +352,12 @@ namespace Demo
 
         private void ToggleVisibility()
         {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(ToggleVisibility));
+                return;
+            }
+
             Visible = !Visible;
             if (Visible)
             {
@@ -296,6 +372,14 @@ namespace Demo
         private void notifyIcon1_MouseDoubleClick(object sender, MouseEventArgs e)
         {
             ToggleVisibility();
+        }
+
+        private void RecoveryTimer_Tick(object sender, EventArgs e)
+        {
+            if (RecoverStaleComboStates())
+            {
+                TryResetKeyboardHook();
+            }
         }
 
         private void UpdateTrayIcon()
@@ -384,12 +468,88 @@ namespace Demo
             }
         }
 
+        private void RunOnUiThread(Action action)
+        {
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            if (!IsHandleCreated)
+            {
+                var unused = Handle;
+            }
+
+            if (InvokeRequired)
+            {
+                BeginInvoke(action);
+                return;
+            }
+
+            action();
+        }
+
+        private Timer CreateSecondKeyTimer(ComboBindingState binding)
+        {
+            var timer = new Timer();
+            timer.Interval = ComboKeyDelayMinimumMilliseconds;
+            timer.Tick += delegate
+            {
+                timer.Stop();
+                HandleDelayedSecondKey(binding);
+            };
+            return timer;
+        }
+
+        private void HandleDelayedSecondKey(ComboBindingState binding)
+        {
+            if (!binding.IsHeld)
+            {
+                return;
+            }
+
+            if (!PressInjectedKey(binding.SecondKey))
+            {
+                ReleaseInjectedKey(binding.FirstKey);
+                binding.IsHeld = false;
+            }
+        }
+
+        private void TryResetKeyboardHook()
+        {
+            try
+            {
+                keyboardHook.Reset();
+                hookFailureLogged = false;
+            }
+            catch (Exception)
+            {
+                SetMappingEnabled(false, "Hook reset failed");
+            }
+        }
+
+        private static bool IsPhysicalKeyDown(Keys key)
+        {
+            return (GetAsyncKeyState((int)key) & 0x8000) != 0;
+        }
+
+        private int GetRandomComboKeyDelayMilliseconds()
+        {
+            return random.Next(ComboKeyDelayMinimumMilliseconds, ComboKeyDelayMaximumMilliseconds + 1);
+        }
+
+        private const int ComboKeyDelayMinimumMilliseconds = 5;
+        private const int ComboKeyDelayMaximumMilliseconds = 15;
+        private const int RecoveryTimerIntervalMilliseconds = 25;
         private const uint KeyeventfKeyup = 0x0002;
         private const uint MapvkVkToVsc = 0;
         private static readonly IntPtr InjectionMarker = new IntPtr(unchecked((int)0x4B364B36));
 
         [DllImport("user32.dll")]
         private static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, IntPtr dwExtraInfo);

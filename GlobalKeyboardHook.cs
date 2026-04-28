@@ -8,6 +8,7 @@ namespace Demo
 {
     internal sealed class GlobalKeyboardHook : IDisposable
     {
+        private readonly object syncRoot = new object();
         private readonly HookProc hookProc;
         private IntPtr hookHandle;
 
@@ -22,13 +23,19 @@ namespace Demo
 
         public void Dispose()
         {
-            if (hookHandle == IntPtr.Zero)
+            lock (syncRoot)
             {
-                return;
+                UnhookCurrentHandle();
             }
+        }
 
-            UnhookWindowsHookEx(hookHandle);
-            hookHandle = IntPtr.Zero;
+        public void Reset()
+        {
+            lock (syncRoot)
+            {
+                UnhookCurrentHandle();
+                hookHandle = SetHook(hookProc);
+            }
         }
 
         private static IntPtr SetHook(HookProc proc)
@@ -54,9 +61,15 @@ namespace Demo
 
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
+            IntPtr currentHookHandle;
+            lock (syncRoot)
+            {
+                currentHookHandle = hookHandle;
+            }
+
             if (nCode < 0)
             {
-                return CallNextHookEx(hookHandle, nCode, wParam, lParam);
+                return CallNextHookEx(currentHookHandle, nCode, wParam, lParam);
             }
 
             var message = unchecked((int)wParam.ToInt64());
@@ -65,7 +78,7 @@ namespace Demo
                 message != WmSyskeydown &&
                 message != WmSyskeyup)
             {
-                return CallNextHookEx(hookHandle, nCode, wParam, lParam);
+                return CallNextHookEx(currentHookHandle, nCode, wParam, lParam);
             }
 
             try
@@ -83,7 +96,7 @@ namespace Demo
                     handler(this, args);
                 }
 
-                return args.Handled ? new IntPtr(1) : CallNextHookEx(hookHandle, nCode, wParam, lParam);
+                return args.Handled ? new IntPtr(1) : CallNextHookEx(currentHookHandle, nCode, wParam, lParam);
             }
             catch (Exception ex)
             {
@@ -93,8 +106,19 @@ namespace Demo
                     errorHandler(this, ex);
                 }
 
-                return CallNextHookEx(hookHandle, nCode, wParam, lParam);
+                return CallNextHookEx(currentHookHandle, nCode, wParam, lParam);
             }
+        }
+
+        private void UnhookCurrentHandle()
+        {
+            if (hookHandle == IntPtr.Zero)
+            {
+                return;
+            }
+
+            UnhookWindowsHookEx(hookHandle);
+            hookHandle = IntPtr.Zero;
         }
 
         private const int WhKeyboardLl = 13;
