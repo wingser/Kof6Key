@@ -24,6 +24,7 @@ namespace Demo
             this.components = new System.ComponentModel.Container();
             this.headerLabel = new System.Windows.Forms.Label();
             this.statusLabel = new System.Windows.Forms.Label();
+            this.autoFireCheckBox = new System.Windows.Forms.CheckBox();
             this.notifyIcon1 = new System.Windows.Forms.NotifyIcon(this.components);
             this.SuspendLayout();
             // 
@@ -50,6 +51,20 @@ namespace Demo
             this.statusLabel.Text = "Enabled";
             this.statusLabel.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
             // 
+            // autoFireCheckBox
+            // 
+            this.autoFireCheckBox.AutoSize = true;
+            this.autoFireCheckBox.Checked = true;
+            this.autoFireCheckBox.CheckState = System.Windows.Forms.CheckState.Checked;
+            this.autoFireCheckBox.ForeColor = System.Drawing.Color.FromArgb(33, 37, 41);
+            this.autoFireCheckBox.Location = new System.Drawing.Point(24, 112);
+            this.autoFireCheckBox.Name = "autoFireCheckBox";
+            this.autoFireCheckBox.Size = new System.Drawing.Size(90, 19);
+            this.autoFireCheckBox.TabIndex = 2;
+            this.autoFireCheckBox.Text = "Auto Fire U";
+            this.autoFireCheckBox.UseVisualStyleBackColor = true;
+            this.autoFireCheckBox.CheckedChanged += new System.EventHandler(this.autoFireCheckBox_CheckedChanged);
+            // 
             // notifyIcon1
             // 
             this.notifyIcon1.Text = "KOF 6-Key Mapper";
@@ -61,7 +76,8 @@ namespace Demo
             this.AutoScaleDimensions = new System.Drawing.SizeF(7F, 17F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.BackColor = System.Drawing.Color.FromArgb(248, 249, 250);
-            this.ClientSize = new System.Drawing.Size(236, 123);
+            this.ClientSize = new System.Drawing.Size(236, 152);
+            this.Controls.Add(this.autoFireCheckBox);
             this.Controls.Add(this.statusLabel);
             this.Controls.Add(this.headerLabel);
             this.Font = new System.Drawing.Font("Segoe UI", 9F);
@@ -81,6 +97,7 @@ namespace Demo
 
         private System.Windows.Forms.Label headerLabel;
         private System.Windows.Forms.Label statusLabel;
+        private System.Windows.Forms.CheckBox autoFireCheckBox;
         private System.Windows.Forms.NotifyIcon notifyIcon1;
     }
 }

@@ -10,6 +10,7 @@ if (-not (Test-Path $cscPath)) {
 $outputDir = Join-Path $PSScriptRoot "dist"
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 $outputExe = Join-Path $outputDir "kof6key.exe"
+$configFile = Join-Path $PSScriptRoot "kof6key.ini"
 
 & $cscPath `
     /target:winexe `
@@ -30,6 +31,10 @@ $outputExe = Join-Path $outputDir "kof6key.exe"
 
 if ($LASTEXITCODE -ne 0) {
     throw "Build failed."
+}
+
+if (Test-Path $configFile) {
+    Copy-Item -Path $configFile -Destination (Join-Path $outputDir "kof6key.ini") -Force
 }
 
 Write-Host "Build completed: dist\\kof6key.exe"
