@@ -1,4 +1,4 @@
-﻿// ==============================================
+// ==============================================
 // 文件名: Main.cs
 // 功能描述: KOF6 按键映射工具主窗体
 // 实现 Q/E 按键到 AS/DS 组合键的映射功能
@@ -147,18 +147,18 @@ namespace Demo
             if (e.KeyCode == Keys.Q)
             {
                 e.Handled = true;
-                HandleComboKey(ref qHeld, e.IsKeyDown, Keys.A, Keys.S);
+                HandleComboKey(ref qHeld, e.IsKeyDown, Keys.A, Keys.S, true);
                 return;
             }
 
             if (e.KeyCode == Keys.E)
             {
                 e.Handled = true;
-                HandleComboKey(ref eHeld, e.IsKeyDown, Keys.D, Keys.S);
+                HandleComboKey(ref eHeld, e.IsKeyDown, Keys.D, Keys.S, false);
             }
         }
 
-        private void HandleComboKey(ref bool isHeld, bool isKeyDown, Keys firstKey, Keys secondKey)
+        private void HandleComboKey(ref bool isHeld, bool isKeyDown, Keys firstKey, Keys secondKey, bool isQKey)
         {
             if (isKeyDown)
             {
@@ -175,7 +175,14 @@ namespace Demo
                 }
 
                 // 启动定时器发送第二个按键（A + 随机延迟 + S）
-                ScheduleSecondKey(firstKey, secondKey);
+                if (isQKey)
+                {
+                    ScheduleQSecondKey(firstKey, secondKey);
+                }
+                else
+                {
+                    ScheduleESecondKey(firstKey, secondKey);
+                }
                 return;
             }
 
@@ -187,47 +194,83 @@ namespace Demo
             isHeld = false;
             ReleaseInjectedKey(firstKey);
             ReleaseInjectedKey(secondKey);
-            CancelPendingKeys();
+            if (isQKey)
+            {
+                CancelQPendingKeys();
+            }
+            else
+            {
+                CancelEPendingKeys();
+            }
         }
 
-        private Keys pendingSecondKeyFirst;
-        private Keys pendingSecondKeySecond;
-        private int pendingSecondKeyDueTick;
+        // Q键的状态
+        private Keys qPendingSecondKeyFirst;
+        private Keys qPendingSecondKeySecond;
+        private int qPendingSecondKeyDueTick;
 
-        private void ScheduleSecondKey(Keys firstKey, Keys secondKey)
+        // E键的状态
+        private Keys ePendingSecondKeyFirst;
+        private Keys ePendingSecondKeySecond;
+        private int ePendingSecondKeyDueTick;
+
+        private void ScheduleQSecondKey(Keys firstKey, Keys secondKey)
         {
-            pendingSecondKeyFirst = firstKey;
-            pendingSecondKeySecond = secondKey;
-            pendingSecondKeyDueTick = unchecked(Environment.TickCount + GetRandomComboKeyDelayMilliseconds());
+            qPendingSecondKeyFirst = firstKey;
+            qPendingSecondKeySecond = secondKey;
+            qPendingSecondKeyDueTick = unchecked(Environment.TickCount + GetRandomComboKeyDelayMilliseconds());
         }
 
-        private void CancelPendingKeys()
+        private void ScheduleESecondKey(Keys firstKey, Keys secondKey)
         {
-            pendingSecondKeyFirst = Keys.None;
-            pendingSecondKeySecond = Keys.None;
-            pendingSecondKeyDueTick = 0;
+            ePendingSecondKeyFirst = firstKey;
+            ePendingSecondKeySecond = secondKey;
+            ePendingSecondKeyDueTick = unchecked(Environment.TickCount + GetRandomComboKeyDelayMilliseconds());
+        }
+
+        private void CancelQPendingKeys()
+        {
+            qPendingSecondKeyFirst = Keys.None;
+            qPendingSecondKeySecond = Keys.None;
+            qPendingSecondKeyDueTick = 0;
+        }
+
+        private void CancelEPendingKeys()
+        {
+            ePendingSecondKeyFirst = Keys.None;
+            ePendingSecondKeySecond = Keys.None;
+            ePendingSecondKeyDueTick = 0;
         }
 
         private void ProcessPendingSecondKey()
         {
-            if (pendingSecondKeyFirst == Keys.None)
+            // 处理Q键的第二个按键
+            if (qPendingSecondKeyFirst != Keys.None)
             {
-                return;
+                if (HasTickElapsed(Environment.TickCount, qPendingSecondKeyDueTick))
+                {
+                    if (!PressInjectedKey(qPendingSecondKeySecond))
+                    {
+                        ReleaseInjectedKey(qPendingSecondKeyFirst);
+                        qHeld = false;
+                    }
+                    CancelQPendingKeys();
+                }
             }
 
-            if (!HasTickElapsed(Environment.TickCount, pendingSecondKeyDueTick))
+            // 处理E键的第二个按键
+            if (ePendingSecondKeyFirst != Keys.None)
             {
-                return;
+                if (HasTickElapsed(Environment.TickCount, ePendingSecondKeyDueTick))
+                {
+                    if (!PressInjectedKey(ePendingSecondKeySecond))
+                    {
+                        ReleaseInjectedKey(ePendingSecondKeyFirst);
+                        eHeld = false;
+                    }
+                    CancelEPendingKeys();
+                }
             }
-
-            // 发送第二个按键（S），发送后立即完成序列
-            if (!PressInjectedKey(pendingSecondKeySecond))
-            {
-                ReleaseInjectedKey(pendingSecondKeyFirst);
-                if (qHeld) qHeld = false;
-                if (eHeld) eHeld = false;
-            }
-            CancelPendingKeys();
         }
 
         private bool PressInjectedKey(Keys key)
@@ -299,18 +342,36 @@ namespace Demo
 
         private void RecoverStaleKeyStates()
         {
-            // 如果 qHeld 状态为 true，但物理按键已释放，强制重置
+            // 恢复 Q 键状态
             if (qHeld && !IsPhysicalKeyDown(Keys.Q))
             {
                 qHeld = false;
-                CancelPendingKeys();
+                // 如果有待发送的第二个按键，说明序列中断了，需要完成序列
+                if (qPendingSecondKeyFirst != Keys.None)
+                {
+                    // 发送第二个按键并立即释放
+                    PressInjectedKey(qPendingSecondKeySecond);
+                    ReleaseInjectedKey(qPendingSecondKeySecond);
+                    // 释放第一个按键
+                    ReleaseInjectedKey(qPendingSecondKeyFirst);
+                    CancelQPendingKeys();
+                }
             }
 
-            // 如果 eHeld 状态为 true，但物理按键已释放，强制重置
+            // 恢复 E 键状态
             if (eHeld && !IsPhysicalKeyDown(Keys.E))
             {
                 eHeld = false;
-                CancelPendingKeys();
+                // 如果有待发送的第二个按键，说明序列中断了，需要完成序列
+                if (ePendingSecondKeyFirst != Keys.None)
+                {
+                    // 发送第二个按键并立即释放
+                    PressInjectedKey(ePendingSecondKeySecond);
+                    ReleaseInjectedKey(ePendingSecondKeySecond);
+                    // 释放第一个按键
+                    ReleaseInjectedKey(ePendingSecondKeyFirst);
+                    CancelEPendingKeys();
+                }
             }
         }
 
