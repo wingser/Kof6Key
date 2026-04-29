@@ -1,3 +1,10 @@
+﻿// ==============================================
+// 文件名: Main.cs
+// 功能描述: KOF6 按键映射工具主窗体
+// 实现 Q/E 按键到 AS/DS 组合键的映射功能
+// 支持配置文件、托盘图标、热键切换等功能
+// ==============================================
+
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -8,6 +15,10 @@ using System.Windows.Forms;
 
 namespace Demo
 {
+    /// <summary>
+    /// KOF6 按键映射工具主窗体
+    /// 实现 Q/E 按键到 AS/DS 组合键的映射
+    /// </summary>
     public partial class Main : Form
     {
         private sealed class AppConfiguration
@@ -279,7 +290,28 @@ namespace Demo
                 return;
             }
 
+            // 状态恢复：检测物理按键是否真正被按住
+            // 当键盘钩子丢失释放事件时，强制重置状态
+            RecoverStaleKeyStates();
+
             ProcessPendingSecondKey();
+        }
+
+        private void RecoverStaleKeyStates()
+        {
+            // 如果 qHeld 状态为 true，但物理按键已释放，强制重置
+            if (qHeld && !IsPhysicalKeyDown(Keys.Q))
+            {
+                qHeld = false;
+                CancelPendingKeys();
+            }
+
+            // 如果 eHeld 状态为 true，但物理按键已释放，强制重置
+            if (eHeld && !IsPhysicalKeyDown(Keys.E))
+            {
+                eHeld = false;
+                CancelPendingKeys();
+            }
         }
 
 

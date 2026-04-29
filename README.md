@@ -21,19 +21,51 @@
 - `ComboDelayMaxMs`：组合键随机延迟的最大值，单位毫秒。
 - `ToggleHotkey`：全局启停热键，键名使用 `System.Windows.Forms.Keys` 枚举名称。
 
-示例：
+### ToggleHotkey 配置说明
+
+`ToggleHotkey` 用于设置启用/禁用映射功能的全局热键，按下此键可切换映射的开启和关闭状态。
+
+#### 支持的按键名称
+
+键名使用 `.NET Framework` 的 `System.Windows.Forms.Keys` 枚举值，以下是常用示例：
+
+| 按键类型 | 示例 | 说明 |
+|---------|------|------|
+| 方向键 | `Right`, `Left`, `Up`, `Down` | 方向键 |
+| 字母键 | `A`, `B`, `Q`, `E`, `F1`-`F12` | 字母键和功能键 |
+| 数字键 | `D0`-`D9`, `NumPad0`-`NumPad9` | 主键盘数字和小键盘数字 |
+| 控制键 | `Ctrl`, `Shift`, `Alt` | 控制键 |
+| 特殊键 | `Space`, `Enter`, `Tab`, `Escape`, `Pause` | 特殊功能键 |
+| 符号键 | `Oemcomma`(,), `OemPeriod`(.), `OemQuestion`(?) | 符号键 |
+
+#### 配置示例
 
 ```ini
-ComboDelayMinMs=10
+ComboDelayMinMs=25
 ComboDelayMaxMs=30
 ToggleHotkey=Right
 ```
 
-说明：
+```ini
+# 使用 F8 作为开关热键
+ComboDelayMinMs=40
+ComboDelayMaxMs=45
+ToggleHotkey=F8
+```
+
+```ini
+# 使用空格键作为开关热键
+ComboDelayMinMs=10
+ComboDelayMaxMs=20
+ToggleHotkey=Space
+```
+
+#### 说明
 
 - `10` 和 `30` 表示 `A/S` 或 `D/S` 之间的第二个按键会在 `10-30ms` 内随机发送。
 - 每轮执行流程是：先点击第一个键，等待一段随机延迟，再点击第二个键，再等待一段同范围随机延迟后才允许进入下一轮。
 - 如果 `ComboDelayMinMs` 大于 `ComboDelayMaxMs`，程序会自动交换这两个值。
+- 配置文件中以 `#` 或 `;` 开头的行为注释行，不会被解析。
 
 ## 实现说明
 1. 使用 Win32 全局低级键盘钩子监听按键。

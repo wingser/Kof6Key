@@ -1,8 +1,18 @@
+﻿// ==============================================
+// 文件名: Main.Designer.cs
+// 功能描述: 主窗体设计器代码
+// 包含主窗体的 UI 控件定义和布局设置
+// 此文件由 Visual Studio Windows Form Designer 自动生成
+// ==============================================
+
 using System.Drawing;
 using System.Windows.Forms;
 
 namespace Demo
 {
+    /// <summary>
+    /// 主窗体设计器部分类
+    /// </summary>
     partial class Main
     {
         private System.ComponentModel.IContainer components = null;

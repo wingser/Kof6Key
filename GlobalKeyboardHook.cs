@@ -1,3 +1,9 @@
+﻿// ==============================================
+// 文件名: GlobalKeyboardHook.cs
+// 功能描述: 全局键盘钩子类
+// 用于捕获系统级的键盘事件，实现全局按键监听
+// ==============================================
+
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -6,21 +12,53 @@ using System.Windows.Forms;
 
 namespace Demo
 {
+    /// <summary>
+    /// 全局键盘钩子类
+    /// 实现对系统键盘事件的全局监听
+    /// </summary>
     internal sealed class GlobalKeyboardHook : IDisposable
     {
+        /// <summary>
+        /// 同步根对象，用于线程安全
+        /// </summary>
         private readonly object syncRoot = new object();
+
+        /// <summary>
+        /// 钩子回调委托
+        /// </summary>
         private readonly HookProc hookProc;
+
+        /// <summary>
+        /// 钩子句柄
+        /// </summary>
         private IntPtr hookHandle;
 
+        /// <summary>
+        /// 构造函数
+        /// 初始化并安装全局键盘钩子
+        /// </summary>
         public GlobalKeyboardHook()
         {
             hookProc = HookCallback;
             hookHandle = SetHook(hookProc);
         }
 
+        /// <summary>
+        /// 键盘按键事件
+        /// 当检测到键盘按键时触发
+        /// </summary>
         public event EventHandler<GlobalKeyboardHookEventArgs> KeyboardPressed;
+
+        /// <summary>
+        /// 钩子错误事件
+        /// 当钩子处理过程中发生异常时触发
+        /// </summary>
         public event Action<object, Exception> HookError;
 
+        /// <summary>
+        /// 释放资源
+        /// 卸载键盘钩子
+        /// </summary>
         public void Dispose()
         {
             lock (syncRoot)
@@ -29,6 +67,10 @@ namespace Demo
             }
         }
 
+        /// <summary>
+        /// 重置钩子
+        /// 卸载并重新安装键盘钩子，用于恢复钩子状态
+        /// </summary>
         public void Reset()
         {
             lock (syncRoot)
@@ -38,6 +80,11 @@ namespace Demo
             }
         }
 
+        /// <summary>
+        /// 设置键盘钩子
+        /// </summary>
+        /// <param name="proc">钩子回调函数</param>
+        /// <returns>钩子句柄</returns>
         private static IntPtr SetHook(HookProc proc)
         {
             using (var process = Process.GetCurrentProcess())
@@ -45,7 +92,7 @@ namespace Demo
             {
                 if (module == null)
                 {
-                    throw new Win32Exception("Unable to read the current process module.");
+                    throw new Win32Exception("无法读取当前进程模块。");
                 }
 
                 var moduleHandle = GetModuleHandle(module.ModuleName);
@@ -59,6 +106,14 @@ namespace Demo
             }
         }
 
+        /// <summary>
+        /// 钩子回调函数
+        /// 处理键盘事件并触发相应的事件通知
+        /// </summary>
+        /// <param name="nCode">钩子代码</param>
+        /// <param name="wParam">消息参数</param>
+        /// <param name="lParam">消息参数</param>
+        /// <returns>处理结果</returns>
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
             IntPtr currentHookHandle;
@@ -67,12 +122,14 @@ namespace Demo
                 currentHookHandle = hookHandle;
             }
 
+            // 如果 nCode < 0，必须传递给下一个钩子
             if (nCode < 0)
             {
                 return CallNextHookEx(currentHookHandle, nCode, wParam, lParam);
             }
 
             var message = unchecked((int)wParam.ToInt64());
+            // 只处理键盘相关的消息
             if (message != WmKeydown &&
                 message != WmKeyup &&
                 message != WmSyskeydown &&
@@ -83,6 +140,7 @@ namespace Demo
 
             try
             {
+                // 解析钩子结构
                 var hookStruct = (KbdLlHookStruct)Marshal.PtrToStructure(lParam, typeof(KbdLlHookStruct));
                 var args = new GlobalKeyboardHookEventArgs(
                     (Keys)hookStruct.vkCode,
@@ -90,16 +148,19 @@ namespace Demo
                     (hookStruct.flags & LlkhfInjected) == LlkhfInjected,
                     hookStruct.scanCode);
 
+                // 触发事件
                 var handler = KeyboardPressed;
                 if (handler != null)
                 {
                     handler(this, args);
                 }
 
+                // 如果事件已处理，返回非零值阻止传递
                 return args.Handled ? new IntPtr(1) : CallNextHookEx(currentHookHandle, nCode, wParam, lParam);
             }
             catch (Exception ex)
             {
+                // 触发错误事件
                 var errorHandler = HookError;
                 if (errorHandler != null)
                 {
@@ -110,6 +171,9 @@ namespace Demo
             }
         }
 
+        /// <summary>
+        /// 卸载当前钩子句柄
+        /// </summary>
         private void UnhookCurrentHandle()
         {
             if (hookHandle == IntPtr.Zero)
@@ -121,25 +185,37 @@ namespace Demo
             hookHandle = IntPtr.Zero;
         }
 
+        // 钩子类型常量
         private const int WhKeyboardLl = 13;
+
+        // Windows 消息常量
         private const int WmKeydown = 0x0100;
         private const int WmKeyup = 0x0101;
         private const int WmSyskeydown = 0x0104;
         private const int WmSyskeyup = 0x0105;
+
+        // 钩子标志常量
         private const int LlkhfInjected = 0x10;
 
+        /// <summary>
+        /// 钩子回调委托类型
+        /// </summary>
         private delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
 
+        /// <summary>
+        /// 键盘钩子结构
+        /// </summary>
         [StructLayout(LayoutKind.Sequential)]
         private struct KbdLlHookStruct
         {
-            public uint vkCode;
-            public uint scanCode;
-            public int flags;
-            public uint time;
-            public IntPtr dwExtraInfo;
+            public uint vkCode;      // 虚拟键码
+            public uint scanCode;    // 扫描码
+            public int flags;        // 标志
+            public uint time;        // 时间戳
+            public IntPtr dwExtraInfo; // 额外信息
         }
 
+        // Win32 API 声明
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);
 
