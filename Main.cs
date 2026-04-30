@@ -23,9 +23,9 @@ namespace Demo
     {
         private sealed class AppConfiguration
         {
-            public int ComboDelayMinimumMilliseconds { get; set; }
+            public int ComboDelayBaseMilliseconds { get; set; }
 
-            public int ComboDelayMaximumMilliseconds { get; set; }
+            public int ComboDelayVarianceMilliseconds { get; set; }
 
             public Keys ToggleHotkey { get; set; }
         }
@@ -58,8 +58,8 @@ namespace Demo
         private Icon enabledTrayIcon;
         private Icon disabledTrayIcon;
         private ComboSequenceState activeSequence = new ComboSequenceState();
-        private int comboDelayMinimumMilliseconds = DefaultComboDelayMinimumMilliseconds;
-        private int comboDelayMaximumMilliseconds = DefaultComboDelayMaximumMilliseconds;
+        private int comboDelayBaseMilliseconds = DefaultComboDelayBaseMilliseconds;
+        private int comboDelayVarianceMilliseconds = DefaultComboDelayVarianceMilliseconds;
         private Keys toggleHotkey = DefaultToggleHotkey;
         private bool qHeld;
         private bool eHeld;
@@ -186,33 +186,29 @@ namespace Demo
                 return;
             }
 
+            // 按键释放时，只标记状态，不取消定时器
+            // 定时器会继续运行，在延迟后发送第二个按键
             if (!isHeld)
             {
                 return;
             }
 
             isHeld = false;
-            ReleaseInjectedKey(firstKey);
-            ReleaseInjectedKey(secondKey);
-            if (isQKey)
-            {
-                CancelQPendingKeys();
-            }
-            else
-            {
-                CancelEPendingKeys();
-            }
+            // 不释放任何按键，不取消定时器
+            // 定时器到期时会处理所有按键的释放
         }
 
         // Q键的状态
         private Keys qPendingSecondKeyFirst;
         private Keys qPendingSecondKeySecond;
         private int qPendingSecondKeyDueTick;
+        private int qPendingSecondKeyReleaseDueTick; // 第二个按键释放的到期时间
 
         // E键的状态
         private Keys ePendingSecondKeyFirst;
         private Keys ePendingSecondKeySecond;
         private int ePendingSecondKeyDueTick;
+        private int ePendingSecondKeyReleaseDueTick; // 第二个按键释放的到期时间
 
         private void ScheduleQSecondKey(Keys firstKey, Keys secondKey)
         {
@@ -233,6 +229,7 @@ namespace Demo
             qPendingSecondKeyFirst = Keys.None;
             qPendingSecondKeySecond = Keys.None;
             qPendingSecondKeyDueTick = 0;
+            qPendingSecondKeyReleaseDueTick = 0;
         }
 
         private void CancelEPendingKeys()
@@ -240,6 +237,7 @@ namespace Demo
             ePendingSecondKeyFirst = Keys.None;
             ePendingSecondKeySecond = Keys.None;
             ePendingSecondKeyDueTick = 0;
+            ePendingSecondKeyReleaseDueTick = 0;
         }
 
         private void ProcessPendingSecondKey()
@@ -247,13 +245,23 @@ namespace Demo
             // 处理Q键的第二个按键
             if (qPendingSecondKeyFirst != Keys.None)
             {
-                if (HasTickElapsed(Environment.TickCount, qPendingSecondKeyDueTick))
+                // 检查是否需要发送第二个按键
+                if (qPendingSecondKeyReleaseDueTick == 0 && HasTickElapsed(Environment.TickCount, qPendingSecondKeyDueTick))
                 {
-                    if (!PressInjectedKey(qPendingSecondKeySecond))
-                    {
-                        ReleaseInjectedKey(qPendingSecondKeyFirst);
-                        qHeld = false;
-                    }
+                    // 发送第二个按键
+                    PressInjectedKey(qPendingSecondKeySecond);
+                    // 先释放第一个按键
+                    ReleaseInjectedKey(qPendingSecondKeyFirst);
+                    // 设置第二个按键的释放延迟（variance + 3ms）
+                    qPendingSecondKeyReleaseDueTick = unchecked(Environment.TickCount + 3 + random.Next(comboDelayVarianceMilliseconds + 1));
+                    return;
+                }
+
+                // 检查是否需要释放第二个按键
+                if (qPendingSecondKeyReleaseDueTick != 0 && HasTickElapsed(Environment.TickCount, qPendingSecondKeyReleaseDueTick))
+                {
+                    // 释放第二个按键
+                    ReleaseInjectedKey(qPendingSecondKeySecond);
                     CancelQPendingKeys();
                 }
             }
@@ -261,13 +269,23 @@ namespace Demo
             // 处理E键的第二个按键
             if (ePendingSecondKeyFirst != Keys.None)
             {
-                if (HasTickElapsed(Environment.TickCount, ePendingSecondKeyDueTick))
+                // 检查是否需要发送第二个按键
+                if (ePendingSecondKeyReleaseDueTick == 0 && HasTickElapsed(Environment.TickCount, ePendingSecondKeyDueTick))
                 {
-                    if (!PressInjectedKey(ePendingSecondKeySecond))
-                    {
-                        ReleaseInjectedKey(ePendingSecondKeyFirst);
-                        eHeld = false;
-                    }
+                    // 发送第二个按键
+                    PressInjectedKey(ePendingSecondKeySecond);
+                    // 先释放第一个按键
+                    ReleaseInjectedKey(ePendingSecondKeyFirst);
+                    // 设置第二个按键的释放延迟（variance + 3ms）
+                    ePendingSecondKeyReleaseDueTick = unchecked(Environment.TickCount + 3 + random.Next(comboDelayVarianceMilliseconds + 1));
+                    return;
+                }
+
+                // 检查是否需要释放第二个按键
+                if (ePendingSecondKeyReleaseDueTick != 0 && HasTickElapsed(Environment.TickCount, ePendingSecondKeyReleaseDueTick))
+                {
+                    // 释放第二个按键
+                    ReleaseInjectedKey(ePendingSecondKeySecond);
                     CancelEPendingKeys();
                 }
             }
@@ -311,6 +329,17 @@ namespace Demo
             }
         }
 
+        private void ClearInjectedKeyRefCounts()
+        {
+            // 遍历所有注入的按键，发送释放事件
+            foreach (var key in injectedKeyRefCounts.Keys)
+            {
+                TrySendKeyboardInput(key, true);
+            }
+            // 清空引用计数字典
+            injectedKeyRefCounts.Clear();
+        }
+
         private bool TrySendKeyboardInput(Keys key, bool keyUp)
         {
             ushort scanCode;
@@ -351,9 +380,9 @@ namespace Demo
                 {
                     // 发送第二个按键并立即释放
                     PressInjectedKey(qPendingSecondKeySecond);
-                    ReleaseInjectedKey(qPendingSecondKeySecond);
                     // 释放第一个按键
                     ReleaseInjectedKey(qPendingSecondKeyFirst);
+                    ReleaseInjectedKey(qPendingSecondKeySecond);
                     CancelQPendingKeys();
                 }
             }
@@ -367,9 +396,9 @@ namespace Demo
                 {
                     // 发送第二个按键并立即释放
                     PressInjectedKey(ePendingSecondKeySecond);
-                    ReleaseInjectedKey(ePendingSecondKeySecond);
                     // 释放第一个按键
                     ReleaseInjectedKey(ePendingSecondKeyFirst);
+                    ReleaseInjectedKey(ePendingSecondKeySecond);
                     CancelEPendingKeys();
                 }
             }
@@ -428,12 +457,19 @@ namespace Demo
             }
 
             isMappingEnabled = enabled;
-            
+
             // 无论启用还是禁用，都重置状态机
             qHeld = false;
             eHeld = false;
             activeSequence.Stage = SequenceStage.Idle;
             hookFailureLogged = false;
+
+            // 清理待发送的按键状态
+            CancelQPendingKeys();
+            CancelEPendingKeys();
+
+            // 清理引用计数，确保所有注入的按键都被释放
+            ClearInjectedKeyRefCounts();
 
             if (enabled)
             {
@@ -587,16 +623,16 @@ namespace Demo
             var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ConfigurationFileName);
             if (!File.Exists(configPath))
             {
-                comboDelayMinimumMilliseconds = DefaultComboDelayMinimumMilliseconds;
-                comboDelayMaximumMilliseconds = DefaultComboDelayMaximumMilliseconds;
+                comboDelayBaseMilliseconds = DefaultComboDelayBaseMilliseconds;
+                comboDelayVarianceMilliseconds = DefaultComboDelayVarianceMilliseconds;
                 toggleHotkey = DefaultToggleHotkey;
                 return;
             }
 
             var values = ReadConfigurationValues(configPath);
             var config = CreateConfiguration(values);
-            comboDelayMinimumMilliseconds = config.ComboDelayMinimumMilliseconds;
-            comboDelayMaximumMilliseconds = config.ComboDelayMaximumMilliseconds;
+            comboDelayBaseMilliseconds = config.ComboDelayBaseMilliseconds;
+            comboDelayVarianceMilliseconds = config.ComboDelayVarianceMilliseconds;
             toggleHotkey = config.ToggleHotkey;
         }
 
@@ -633,27 +669,20 @@ namespace Demo
         private static AppConfiguration CreateConfiguration(IDictionary<string, string> values)
         {
             var config = new AppConfiguration();
-            config.ComboDelayMinimumMilliseconds = DefaultComboDelayMinimumMilliseconds;
-            config.ComboDelayMaximumMilliseconds = DefaultComboDelayMaximumMilliseconds;
+            config.ComboDelayBaseMilliseconds = DefaultComboDelayBaseMilliseconds;
+            config.ComboDelayVarianceMilliseconds = DefaultComboDelayVarianceMilliseconds;
             config.ToggleHotkey = DefaultToggleHotkey;
 
-            int delayMinimum;
-            if (TryGetPositiveInt(values, "ComboDelayMinMs", out delayMinimum))
+            int delayBase;
+            if (TryGetPositiveInt(values, "ComboDelayBaseMs", out delayBase))
             {
-                config.ComboDelayMinimumMilliseconds = delayMinimum;
+                config.ComboDelayBaseMilliseconds = delayBase;
             }
 
-            int delayMaximum;
-            if (TryGetPositiveInt(values, "ComboDelayMaxMs", out delayMaximum))
+            int delayVariance;
+            if (TryGetPositiveInt(values, "ComboDelayVarianceMs", out delayVariance))
             {
-                config.ComboDelayMaximumMilliseconds = delayMaximum;
-            }
-
-            if (config.ComboDelayMinimumMilliseconds > config.ComboDelayMaximumMilliseconds)
-            {
-                var swap = config.ComboDelayMinimumMilliseconds;
-                config.ComboDelayMinimumMilliseconds = config.ComboDelayMaximumMilliseconds;
-                config.ComboDelayMaximumMilliseconds = swap;
+                config.ComboDelayVarianceMilliseconds = delayVariance;
             }
 
             Keys parsedToggleHotkey;
@@ -698,7 +727,8 @@ namespace Demo
 
         private int GetRandomComboKeyDelayMilliseconds()
         {
-            return random.Next(comboDelayMinimumMilliseconds, comboDelayMaximumMilliseconds + 1);
+            // 实际延迟 = 基础固定值 + 0到浮动值之间的随机数
+            return comboDelayBaseMilliseconds + random.Next(comboDelayVarianceMilliseconds + 1);
         }
 
         private static bool HasTickElapsed(int currentTick, int dueTick)
@@ -707,8 +737,8 @@ namespace Demo
         }
 
         private const string ConfigurationFileName = "kof6key.ini";
-        private const int DefaultComboDelayMinimumMilliseconds = 25;
-        private const int DefaultComboDelayMaximumMilliseconds = 30;
+        private const int DefaultComboDelayBaseMilliseconds = 25;
+        private const int DefaultComboDelayVarianceMilliseconds = 5;
         private static readonly Keys DefaultToggleHotkey = Keys.Right;
         private const int StateTimerIntervalMilliseconds = 10;
         private const uint KeyeventfKeyup = 0x0002;

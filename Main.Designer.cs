@@ -32,31 +32,19 @@ namespace Demo
         private void InitializeComponent()
         {
             this.components = new System.ComponentModel.Container();
-            this.headerLabel = new System.Windows.Forms.Label();
             this.statusLabel = new System.Windows.Forms.Label();
             this.notifyIcon1 = new System.Windows.Forms.NotifyIcon(this.components);
             this.SuspendLayout();
-            // 
-            // headerLabel
-            // 
-            this.headerLabel.AutoSize = true;
-            this.headerLabel.Font = new System.Drawing.Font("Segoe UI Semibold", 14F, System.Drawing.FontStyle.Bold);
-            this.headerLabel.ForeColor = System.Drawing.Color.FromArgb(33, 37, 41);
-            this.headerLabel.Location = new System.Drawing.Point(24, 18);
-            this.headerLabel.Name = "headerLabel";
-            this.headerLabel.Size = new System.Drawing.Size(152, 25);
-            this.headerLabel.TabIndex = 0;
-            this.headerLabel.Text = "KOF Hot Key";
             // 
             // statusLabel
             // 
             this.statusLabel.BackColor = System.Drawing.Color.FromArgb(220, 252, 231);
             this.statusLabel.Font = new System.Drawing.Font("Segoe UI Semibold", 12F, System.Drawing.FontStyle.Bold);
             this.statusLabel.ForeColor = System.Drawing.Color.FromArgb(22, 101, 52);
-            this.statusLabel.Location = new System.Drawing.Point(24, 58);
+            this.statusLabel.Location = new System.Drawing.Point(24, 18);
             this.statusLabel.Name = "statusLabel";
             this.statusLabel.Size = new System.Drawing.Size(188, 42);
-            this.statusLabel.TabIndex = 1;
+            this.statusLabel.TabIndex = 0;
             this.statusLabel.Text = "Enabled";
             this.statusLabel.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
             // 
@@ -71,9 +59,8 @@ namespace Demo
             this.AutoScaleDimensions = new System.Drawing.SizeF(7F, 17F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.BackColor = System.Drawing.Color.FromArgb(248, 249, 250);
-            this.ClientSize = new System.Drawing.Size(236, 123);
+            this.ClientSize = new System.Drawing.Size(236, 80);
             this.Controls.Add(this.statusLabel);
-            this.Controls.Add(this.headerLabel);
             this.Font = new System.Drawing.Font("Segoe UI", 9F);
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
@@ -89,7 +76,6 @@ namespace Demo
 
         #endregion
 
-        private System.Windows.Forms.Label headerLabel;
         private System.Windows.Forms.Label statusLabel;
         private System.Windows.Forms.NotifyIcon notifyIcon1;
     }
