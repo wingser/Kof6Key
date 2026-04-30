@@ -162,131 +162,128 @@ namespace Demo
         {
             if (isKeyDown)
             {
-                if (isHeld)
-                {
-                    return;
-                }
-
                 isHeld = true;
-                if (!PressInjectedKey(firstKey))
+                
+                // 创建新的队列项
+                var queueItem = new ComboQueueItem
                 {
-                    isHeld = false;
-                    return;
-                }
+                    FirstKey = firstKey,
+                    SecondKey = secondKey,
+                    DueTick = unchecked(Environment.TickCount + GetRandomComboKeyDelayMilliseconds()),
+                    FirstKeyReleaseDelay = 0,
+                    ReleaseDueTick = 0,
+                    SentFirstKeyReleased = false,
+                    SentSecondKey = false
+                };
 
-                // 启动定时器发送第二个按键（A + 随机延迟 + S）
+                // 发送第一个按键
+                PressInjectedKey(firstKey);
+
+                // 添加到队列
                 if (isQKey)
                 {
-                    ScheduleQSecondKey(firstKey, secondKey);
+                    qComboQueue.Enqueue(queueItem);
                 }
                 else
                 {
-                    ScheduleESecondKey(firstKey, secondKey);
+                    eComboQueue.Enqueue(queueItem);
                 }
                 return;
             }
 
-            // 按键释放时，只标记状态，不取消定时器
-            // 定时器会继续运行，在延迟后发送第二个按键
+            // 按键释放时，只标记状态
             if (!isHeld)
             {
                 return;
             }
 
             isHeld = false;
-            // 不释放任何按键，不取消定时器
-            // 定时器到期时会处理所有按键的释放
         }
 
-        // Q键的状态
-        private Keys qPendingSecondKeyFirst;
-        private Keys qPendingSecondKeySecond;
-        private int qPendingSecondKeyDueTick;
-        private int qPendingSecondKeyReleaseDueTick; // 第二个按键释放的到期时间
-
-        // E键的状态
-        private Keys ePendingSecondKeyFirst;
-        private Keys ePendingSecondKeySecond;
-        private int ePendingSecondKeyDueTick;
-        private int ePendingSecondKeyReleaseDueTick; // 第二个按键释放的到期时间
-
-        private void ScheduleQSecondKey(Keys firstKey, Keys secondKey)
+        // 按键序列队列项
+        private sealed class ComboQueueItem
         {
-            qPendingSecondKeyFirst = firstKey;
-            qPendingSecondKeySecond = secondKey;
-            qPendingSecondKeyDueTick = unchecked(Environment.TickCount + GetRandomComboKeyDelayMilliseconds());
+            public Keys FirstKey { get; set; }
+            public Keys SecondKey { get; set; }
+            public int DueTick { get; set; }
+            public int FirstKeyReleaseDelay { get; set; }
+            public int ReleaseDueTick { get; set; }
+            public bool SentFirstKeyReleased { get; set; }
+            public bool SentSecondKey { get; set; }
         }
 
-        private void ScheduleESecondKey(Keys firstKey, Keys secondKey)
-        {
-            ePendingSecondKeyFirst = firstKey;
-            ePendingSecondKeySecond = secondKey;
-            ePendingSecondKeyDueTick = unchecked(Environment.TickCount + GetRandomComboKeyDelayMilliseconds());
-        }
+        // Q键的队列
+        private readonly Queue<ComboQueueItem> qComboQueue = new Queue<ComboQueueItem>();
+        private ComboQueueItem qCurrentItem;
+
+        // E键的队列
+        private readonly Queue<ComboQueueItem> eComboQueue = new Queue<ComboQueueItem>();
+        private ComboQueueItem eCurrentItem;
 
         private void CancelQPendingKeys()
         {
-            qPendingSecondKeyFirst = Keys.None;
-            qPendingSecondKeySecond = Keys.None;
-            qPendingSecondKeyDueTick = 0;
-            qPendingSecondKeyReleaseDueTick = 0;
+            // 清空队列
+            qComboQueue.Clear();
+            qCurrentItem = null;
         }
 
         private void CancelEPendingKeys()
         {
-            ePendingSecondKeyFirst = Keys.None;
-            ePendingSecondKeySecond = Keys.None;
-            ePendingSecondKeyDueTick = 0;
-            ePendingSecondKeyReleaseDueTick = 0;
+            // 清空队列
+            eComboQueue.Clear();
+            eCurrentItem = null;
         }
 
         private void ProcessPendingSecondKey()
         {
-            // 处理Q键的第二个按键
-            if (qPendingSecondKeyFirst != Keys.None)
-            {
-                // 检查是否需要发送第二个按键
-                if (qPendingSecondKeyReleaseDueTick == 0 && HasTickElapsed(Environment.TickCount, qPendingSecondKeyDueTick))
-                {
-                    // 发送第二个按键
-                    PressInjectedKey(qPendingSecondKeySecond);
-                    // 先释放第一个按键
-                    ReleaseInjectedKey(qPendingSecondKeyFirst);
-                    // 设置第二个按键的释放延迟（variance + 3ms）
-                    qPendingSecondKeyReleaseDueTick = unchecked(Environment.TickCount + 3 + random.Next(comboDelayVarianceMilliseconds + 1));
-                    return;
-                }
+            // 处理Q键队列
+            ProcessComboQueue(qComboQueue, ref qCurrentItem);
 
-                // 检查是否需要释放第二个按键
-                if (qPendingSecondKeyReleaseDueTick != 0 && HasTickElapsed(Environment.TickCount, qPendingSecondKeyReleaseDueTick))
-                {
-                    // 释放第二个按键
-                    ReleaseInjectedKey(qPendingSecondKeySecond);
-                    CancelQPendingKeys();
-                }
+            // 处理E键队列
+            ProcessComboQueue(eComboQueue, ref eCurrentItem);
+        }
+
+        private void ProcessComboQueue(Queue<ComboQueueItem> queue, ref ComboQueueItem currentItem)
+        {
+            // 如果没有当前项且队列不为空，取出下一项
+            if (currentItem == null && queue.Count > 0)
+            {
+                currentItem = queue.Dequeue();
             }
 
-            // 处理E键的第二个按键
-            if (ePendingSecondKeyFirst != Keys.None)
+            // 如果有当前项，处理它
+            if (currentItem != null)
             {
-                // 检查是否需要发送第二个按键
-                if (ePendingSecondKeyReleaseDueTick == 0 && HasTickElapsed(Environment.TickCount, ePendingSecondKeyDueTick))
+                // 检查是否需要释放第一个按键并准备发送第二个按键
+                // 注意：只有当第一个按键还未释放时，才执行此检查
+                if (!currentItem.SentFirstKeyReleased && HasTickElapsed(Environment.TickCount, currentItem.DueTick))
+                {
+                    // 先释放第一个按键
+                    ReleaseInjectedKey(currentItem.FirstKey);
+                    // 设置第一个按键释放后的延迟
+                    currentItem.FirstKeyReleaseDelay = unchecked(Environment.TickCount + comboDelayBaseMilliseconds + random.Next(comboDelayVarianceMilliseconds + 1));
+                    currentItem.SentFirstKeyReleased = true;
+                    return;
+                }
+
+                // 检查是否需要发送第二个按键（在第一个按键释放延迟后）
+                if (currentItem.SentFirstKeyReleased && !currentItem.SentSecondKey && HasTickElapsed(Environment.TickCount, currentItem.FirstKeyReleaseDelay))
                 {
                     // 发送第二个按键
-                    PressInjectedKey(ePendingSecondKeySecond);
-                    // 先释放第一个按键
-                    ReleaseInjectedKey(ePendingSecondKeyFirst);
-                    // 设置第二个按键的释放延迟（variance + 3ms）
-                    ePendingSecondKeyReleaseDueTick = unchecked(Environment.TickCount + 3 + random.Next(comboDelayVarianceMilliseconds + 1));
+                    PressInjectedKey(currentItem.SecondKey);
+                    // 设置第二个按键的释放延迟（base + random(0~variance)，与第一个按键间隔相同）
+                    currentItem.ReleaseDueTick = unchecked(Environment.TickCount + comboDelayBaseMilliseconds + random.Next(comboDelayVarianceMilliseconds + 1));
+                    currentItem.SentSecondKey = true;
                     return;
                 }
 
                 // 检查是否需要释放第二个按键
-                if (ePendingSecondKeyReleaseDueTick != 0 && HasTickElapsed(Environment.TickCount, ePendingSecondKeyReleaseDueTick))
+                if (currentItem.SentSecondKey && HasTickElapsed(Environment.TickCount, currentItem.ReleaseDueTick))
                 {
                     // 释放第二个按键
-                    ReleaseInjectedKey(ePendingSecondKeySecond);
-                    CancelEPendingKeys();
+                    ReleaseInjectedKey(currentItem.SecondKey);
+                    // 清除当前项，允许处理下一个
+                    currentItem = null;
                 }
             }
         }
@@ -372,35 +369,17 @@ namespace Demo
         private void RecoverStaleKeyStates()
         {
             // 恢复 Q 键状态
+            // 队列机制会自动处理序列，只需重置 held 状态
             if (qHeld && !IsPhysicalKeyDown(Keys.Q))
             {
                 qHeld = false;
-                // 如果有待发送的第二个按键，说明序列中断了，需要完成序列
-                if (qPendingSecondKeyFirst != Keys.None)
-                {
-                    // 发送第二个按键并立即释放
-                    PressInjectedKey(qPendingSecondKeySecond);
-                    // 释放第一个按键
-                    ReleaseInjectedKey(qPendingSecondKeyFirst);
-                    ReleaseInjectedKey(qPendingSecondKeySecond);
-                    CancelQPendingKeys();
-                }
             }
 
             // 恢复 E 键状态
+            // 队列机制会自动处理序列，只需重置 held 状态
             if (eHeld && !IsPhysicalKeyDown(Keys.E))
             {
                 eHeld = false;
-                // 如果有待发送的第二个按键，说明序列中断了，需要完成序列
-                if (ePendingSecondKeyFirst != Keys.None)
-                {
-                    // 发送第二个按键并立即释放
-                    PressInjectedKey(ePendingSecondKeySecond);
-                    // 释放第一个按键
-                    ReleaseInjectedKey(ePendingSecondKeyFirst);
-                    ReleaseInjectedKey(ePendingSecondKeySecond);
-                    CancelEPendingKeys();
-                }
             }
         }
 
@@ -620,6 +599,19 @@ namespace Demo
 
         private void LoadConfiguration()
         {
+            // 确保托盘图标已初始化（在显示气泡提示前需要设置 Icon）
+            EnsureTrayIcons();
+            if (baseAppIcon != null && notifyIcon1.Icon == null)
+            {
+                notifyIcon1.Icon = baseAppIcon;
+            }
+            
+            // 如果 notifyIcon1.Icon 仍然为 null，创建一个简单的默认图标
+            if (notifyIcon1.Icon == null)
+            {
+                notifyIcon1.Icon = CreateDefaultIcon();
+            }
+            
             var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ConfigurationFileName);
             if (!File.Exists(configPath))
             {
@@ -634,6 +626,21 @@ namespace Demo
             comboDelayBaseMilliseconds = config.ComboDelayBaseMilliseconds;
             comboDelayVarianceMilliseconds = config.ComboDelayVarianceMilliseconds;
             toggleHotkey = config.ToggleHotkey;
+        }
+
+        private static Icon CreateDefaultIcon()
+        {
+            // 创建一个简单的默认图标（绿色圆形）
+            var bitmap = new Bitmap(16, 16);
+            using (var graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.Clear(Color.Transparent);
+                using (var brush = new SolidBrush(Color.Green))
+                {
+                    graphics.FillEllipse(brush, 2, 2, 12, 12);
+                }
+            }
+            return Icon.FromHandle(bitmap.GetHicon());
         }
 
         private static Dictionary<string, string> ReadConfigurationValues(string configPath)
@@ -737,10 +744,10 @@ namespace Demo
         }
 
         private const string ConfigurationFileName = "kof6key.ini";
-        private const int DefaultComboDelayBaseMilliseconds = 25;
+        private const int DefaultComboDelayBaseMilliseconds = 40;
         private const int DefaultComboDelayVarianceMilliseconds = 5;
         private static readonly Keys DefaultToggleHotkey = Keys.Right;
-        private const int StateTimerIntervalMilliseconds = 10;
+        private const int StateTimerIntervalMilliseconds = 1;
         private const uint KeyeventfKeyup = 0x0002;
         private const uint MapvkVkToVsc = 0;
         private static readonly IntPtr InjectionMarker = new IntPtr(unchecked((int)0x4B364B36));

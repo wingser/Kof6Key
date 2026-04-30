@@ -67,7 +67,7 @@ namespace Demo
             this.MinimizeBox = false;
             this.Name = "Main";
             this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
-            this.Text = "KOF Key Mapper";
+            this.Text = "KOF防冲突6键";
             this.Load += new System.EventHandler(this.Main_Load);
             this.Shown += new System.EventHandler(this.Main_Shown);
             this.ResumeLayout(false);
