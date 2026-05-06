@@ -8,6 +8,7 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace Demo
@@ -19,11 +20,6 @@ namespace Demo
     internal sealed class GlobalKeyboardHook : IDisposable
     {
         /// <summary>
-        /// 同步根对象，用于线程安全
-        /// </summary>
-        private readonly object syncRoot = new object();
-
-        /// <summary>
         /// 钩子回调委托
         /// </summary>
         private readonly HookProc hookProc;
@@ -32,6 +28,11 @@ namespace Demo
         /// 钩子句柄
         /// </summary>
         private IntPtr hookHandle;
+        private readonly Thread hookThread;
+        private readonly ManualResetEventSlim hookReady = new ManualResetEventSlim(false);
+        private Exception hookInitializationException;
+        private int hookThreadId;
+        private bool disposed;
 
         /// <summary>
         /// 构造函数
@@ -40,7 +41,15 @@ namespace Demo
         public GlobalKeyboardHook()
         {
             hookProc = HookCallback;
-            hookHandle = SetHook(hookProc);
+            hookThread = new Thread(HookThreadMain);
+            hookThread.IsBackground = true;
+            hookThread.Name = "GlobalKeyboardHookThread";
+            hookThread.Start();
+            hookReady.Wait();
+            if (hookInitializationException != null)
+            {
+                throw new InvalidOperationException("无法初始化全局键盘钩子。", hookInitializationException);
+            }
         }
 
         /// <summary>
@@ -61,10 +70,20 @@ namespace Demo
         /// </summary>
         public void Dispose()
         {
-            lock (syncRoot)
+            if (disposed)
             {
-                UnhookCurrentHandle();
+                return;
             }
+
+            disposed = true;
+            if (hookThreadId != 0)
+            {
+                PostThreadMessage(hookThreadId, WmAppQuit, UIntPtr.Zero, IntPtr.Zero);
+                hookThread.Join(2000);
+            }
+
+            UnhookCurrentHandle();
+            hookReady.Dispose();
         }
 
         /// <summary>
@@ -73,11 +92,12 @@ namespace Demo
         /// </summary>
         public void Reset()
         {
-            lock (syncRoot)
+            if (disposed || hookThreadId == 0)
             {
-                UnhookCurrentHandle();
-                hookHandle = SetHook(hookProc);
+                return;
             }
+
+            PostThreadMessage(hookThreadId, WmAppResetHook, UIntPtr.Zero, IntPtr.Zero);
         }
 
         /// <summary>
@@ -116,11 +136,7 @@ namespace Demo
         /// <returns>处理结果</returns>
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
-            IntPtr currentHookHandle;
-            lock (syncRoot)
-            {
-                currentHookHandle = hookHandle;
-            }
+            var currentHookHandle = hookHandle;
 
             // 如果 nCode < 0，必须传递给下一个钩子
             if (nCode < 0)
@@ -138,33 +154,35 @@ namespace Demo
                 return CallNextHookEx(currentHookHandle, nCode, wParam, lParam);
             }
 
+            GlobalKeyboardHookEventArgs args = null;
             try
             {
-                // 解析钩子结构
                 var hookStruct = (KbdLlHookStruct)Marshal.PtrToStructure(lParam, typeof(KbdLlHookStruct));
-                var args = new GlobalKeyboardHookEventArgs(
+                args = new GlobalKeyboardHookEventArgs(
                     (Keys)hookStruct.vkCode,
                     message == WmKeydown || message == WmSyskeydown,
                     (hookStruct.flags & LlkhfInjected) == LlkhfInjected,
                     hookStruct.scanCode);
 
-                // 触发事件
                 var handler = KeyboardPressed;
                 if (handler != null)
                 {
                     handler(this, args);
                 }
 
-                // 如果事件已处理，返回非零值阻止传递
                 return args.Handled ? new IntPtr(1) : CallNextHookEx(currentHookHandle, nCode, wParam, lParam);
             }
             catch (Exception ex)
             {
-                // 触发错误事件
                 var errorHandler = HookError;
                 if (errorHandler != null)
                 {
                     errorHandler(this, ex);
+                }
+
+                if (args != null && args.Handled)
+                {
+                    return new IntPtr(1);
                 }
 
                 return CallNextHookEx(currentHookHandle, nCode, wParam, lParam);
@@ -185,8 +203,57 @@ namespace Demo
             hookHandle = IntPtr.Zero;
         }
 
+        private void HookThreadMain()
+        {
+            try
+            {
+                hookThreadId = GetCurrentThreadId();
+                hookHandle = SetHook(hookProc);
+            }
+            catch (Exception ex)
+            {
+                hookInitializationException = ex;
+                hookReady.Set();
+                return;
+            }
+
+            hookReady.Set();
+
+            NativeMessage message;
+            while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0)
+            {
+                if (message.message == WmAppResetHook)
+                {
+                    try
+                    {
+                        UnhookCurrentHandle();
+                        hookHandle = SetHook(hookProc);
+                    }
+                    catch (Exception ex)
+                    {
+                        var errorHandler = HookError;
+                        if (errorHandler != null)
+                        {
+                            errorHandler(this, ex);
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (message.message == WmAppQuit)
+                {
+                    break;
+                }
+            }
+
+            UnhookCurrentHandle();
+        }
+
         // 钩子类型常量
         private const int WhKeyboardLl = 13;
+        private const uint WmAppResetHook = 0x8000 + 1;
+        private const uint WmAppQuit = 0x8000 + 2;
 
         // Windows 消息常量
         private const int WmKeydown = 0x0100;
@@ -215,6 +282,17 @@ namespace Demo
             public IntPtr dwExtraInfo; // 额外信息
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeMessage
+        {
+            public IntPtr hwnd;
+            public uint message;
+            public UIntPtr wParam;
+            public IntPtr lParam;
+            public uint time;
+            public System.Drawing.Point pt;
+        }
+
         // Win32 API 声明
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);
@@ -228,5 +306,14 @@ namespace Demo
 
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool PostThreadMessage(int idThread, uint msg, UIntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern sbyte GetMessage(out NativeMessage lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+        [DllImport("kernel32.dll")]
+        private static extern int GetCurrentThreadId();
     }
 }

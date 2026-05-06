@@ -1,24 +1,14 @@
-// ==============================================
-// 文件名: Main.cs
-// 功能描述: KOF6 按键映射工具主窗体
-// 实现 Q/E 按键到 AS/DS 组合键的映射功能
-// 支持配置文件、托盘图标、热键切换等功能
-// ==============================================
-
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace Demo
 {
-    /// <summary>
-    /// KOF6 按键映射工具主窗体
-    /// 实现 Q/E 按键到 AS/DS 组合键的映射
-    /// </summary>
     public partial class Main : Form
     {
         private sealed class AppConfiguration
@@ -28,50 +18,63 @@ namespace Demo
             public int ComboDelayVarianceMilliseconds { get; set; }
 
             public Keys ToggleHotkey { get; set; }
+
+            public bool VerboseLoggingEnabled { get; set; }
         }
 
-        private enum SequenceStage
+        private sealed class ComboQueueItem
         {
-            Idle,
-            WaitingForSecondKey,
-            WaitingForCycleEnd
-        }
-
-        private sealed class ComboSequenceState
-        {
-            public Keys SourceKey { get; set; }
-
             public Keys FirstKey { get; set; }
-
             public Keys SecondKey { get; set; }
-
-            public SequenceStage Stage { get; set; }
-
             public int DueTick { get; set; }
+            public int FirstKeyReleaseDelay { get; set; }
+            public int ReleaseDueTick { get; set; }
+            public bool SentFirstKeyReleased { get; set; }
+            public bool SentSecondKey { get; set; }
         }
 
         private readonly GlobalKeyboardHook keyboardHook;
-        private readonly Timer stateTimer;
+        private readonly System.Threading.Timer stateTimer;
         private readonly Random random = new Random();
+        private readonly object stateSync = new object();
+        private readonly object logSync = new object();
+        private readonly string logFilePath;
+        private readonly Queue<string> pendingLogLines = new Queue<string>();
+        private int logFlushScheduled;
         private readonly Dictionary<Keys, int> injectedKeyRefCounts = new Dictionary<Keys, int>();
+        private readonly Queue<ComboQueueItem> qComboQueue = new Queue<ComboQueueItem>();
+        private readonly Queue<ComboQueueItem> eComboQueue = new Queue<ComboQueueItem>();
         private Icon baseAppIcon;
         private Icon enabledTrayIcon;
         private Icon disabledTrayIcon;
-        private ComboSequenceState activeSequence = new ComboSequenceState();
+        private ComboQueueItem qCurrentItem;
+        private ComboQueueItem eCurrentItem;
         private int comboDelayBaseMilliseconds = DefaultComboDelayBaseMilliseconds;
         private int comboDelayVarianceMilliseconds = DefaultComboDelayVarianceMilliseconds;
         private Keys toggleHotkey = DefaultToggleHotkey;
-        private bool qHeld;
-        private bool eHeld;
+        private bool verboseLoggingEnabled;
         private bool toggleHotkeyHeld;
         private bool pauseHeld;
-        private bool isMappingEnabled = true;
-        private bool hookFailureLogged;
+        private volatile bool isMappingEnabled = true;
         private bool startHidden = true;
+        private int pendingQComboCount;
+        private int pendingEComboCount;
+        private int stateTimerRunning;
+        private volatile bool isClosing;
+        private int lastActivityTick = Environment.TickCount;
+        private const int StateStuckTimeoutMilliseconds = 5000;
+        private int lastLoggedStuckWarning = Environment.TickCount;
+        private int lastHookActivityTick = Environment.TickCount;
+        private const int HookTimeoutMilliseconds = 1000;
+        private int hookRecoveryAttempts = 0;
+        private const int MaxHookRecoveryAttempts = 5;
+        private int lastComboKeyPressTick = Environment.TickCount;
+        private const int ComboQueueDrainTimeoutMilliseconds = 500;
 
         public Main()
         {
             InitializeComponent();
+            logFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, LogFileName);
 
             baseAppIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             if (baseAppIcon != null)
@@ -85,14 +88,16 @@ namespace Demo
             keyboardHook.KeyboardPressed += KeyboardHook_KeyboardPressed;
             keyboardHook.HookError += KeyboardHook_HookError;
 
-            stateTimer = new Timer();
-            stateTimer.Interval = StateTimerIntervalMilliseconds;
-            stateTimer.Tick += StateTimer_Tick;
-            stateTimer.Start();
+            stateTimer = new System.Threading.Timer(
+                StateTimer_Tick,
+                null,
+                StateTimerIntervalMilliseconds,
+                StateTimerIntervalMilliseconds);
 
             UpdateStatusLabel();
 
             FormClosing += Main_Closing;
+            LogDebug("app-start");
         }
 
         private void Main_Load(object sender, EventArgs e)
@@ -101,17 +106,28 @@ namespace Demo
 
         private void Main_Shown(object sender, EventArgs e)
         {
-            if (startHidden)
+            if (!startHidden)
             {
-                startHidden = false;
-                HideToTray();
+                return;
             }
+
+            startHidden = false;
+            HideToTray();
         }
 
         private void Main_Closing(object sender, CancelEventArgs e)
         {
-            stateTimer.Stop();
+            isClosing = true;
+            stateTimer.Change(Timeout.Infinite, Timeout.Infinite);
+            lock (stateSync)
+            {
+                ResetRuntimeState();
+            }
+
+            LogDebug("app-closing");
+            FlushPendingLogsSync();
             keyboardHook.HookError -= KeyboardHook_HookError;
+            keyboardHook.KeyboardPressed -= KeyboardHook_KeyboardPressed;
             keyboardHook.Dispose();
             stateTimer.Dispose();
             notifyIcon1.Visible = false;
@@ -120,26 +136,40 @@ namespace Demo
 
         private void KeyboardHook_HookError(object sender, Exception e)
         {
+            LogDebug("hook-error " + e.GetType().Name + " " + e.Message);
             RunOnUiThread(() =>
             {
-                if (hookFailureLogged)
+                lock (stateSync)
                 {
-                    return;
+                    ResetRuntimeState();
                 }
-
-                hookFailureLogged = true;
-                activeSequence.Stage = SequenceStage.Idle;
             });
         }
 
+        private const int HookCallbackTimeoutMilliseconds = 200;
+
         private void KeyboardHook_KeyboardPressed(object sender, GlobalKeyboardHookEventArgs e)
         {
-            if (e.IsInjected)
+            var startTime = Environment.TickCount;
+            
+            if (CheckHookTimeout(startTime))
             {
                 return;
             }
 
-            if (!isMappingEnabled)
+            Interlocked.Exchange(ref lastHookActivityTick, Environment.TickCount);
+            
+            if (CheckHookTimeout(startTime))
+            {
+                return;
+            }
+
+            if (!isMappingEnabled || e.IsInjected)
+            {
+                return;
+            }
+
+            if (CheckHookTimeout(startTime))
             {
                 return;
             }
@@ -147,243 +177,162 @@ namespace Demo
             if (e.KeyCode == Keys.Q)
             {
                 e.Handled = true;
-                HandleComboKey(ref qHeld, e.IsKeyDown, Keys.A, Keys.S, true);
-                return;
+                if (!CheckHookTimeout(startTime))
+                {
+                    RegisterComboRequest(Keys.Q, e.IsKeyDown);
+                }
             }
-
-            if (e.KeyCode == Keys.E)
+            else if (e.KeyCode == Keys.E)
             {
                 e.Handled = true;
-                HandleComboKey(ref eHeld, e.IsKeyDown, Keys.D, Keys.S, false);
-            }
-        }
-
-        private void HandleComboKey(ref bool isHeld, bool isKeyDown, Keys firstKey, Keys secondKey, bool isQKey)
-        {
-            if (isKeyDown)
-            {
-                isHeld = true;
-                
-                // 创建新的队列项
-                var queueItem = new ComboQueueItem
+                if (!CheckHookTimeout(startTime))
                 {
-                    FirstKey = firstKey,
-                    SecondKey = secondKey,
-                    DueTick = unchecked(Environment.TickCount + GetRandomComboKeyDelayMilliseconds()),
-                    FirstKeyReleaseDelay = 0,
-                    ReleaseDueTick = 0,
-                    SentFirstKeyReleased = false,
-                    SentSecondKey = false
-                };
-
-                // 发送第一个按键
-                PressInjectedKey(firstKey);
-
-                // 添加到队列
-                if (isQKey)
-                {
-                    qComboQueue.Enqueue(queueItem);
-                }
-                else
-                {
-                    eComboQueue.Enqueue(queueItem);
-                }
-                return;
-            }
-
-            // 按键释放时，只标记状态
-            if (!isHeld)
-            {
-                return;
-            }
-
-            isHeld = false;
-        }
-
-        // 按键序列队列项
-        private sealed class ComboQueueItem
-        {
-            public Keys FirstKey { get; set; }
-            public Keys SecondKey { get; set; }
-            public int DueTick { get; set; }
-            public int FirstKeyReleaseDelay { get; set; }
-            public int ReleaseDueTick { get; set; }
-            public bool SentFirstKeyReleased { get; set; }
-            public bool SentSecondKey { get; set; }
-        }
-
-        // Q键的队列
-        private readonly Queue<ComboQueueItem> qComboQueue = new Queue<ComboQueueItem>();
-        private ComboQueueItem qCurrentItem;
-
-        // E键的队列
-        private readonly Queue<ComboQueueItem> eComboQueue = new Queue<ComboQueueItem>();
-        private ComboQueueItem eCurrentItem;
-
-        private void CancelQPendingKeys()
-        {
-            // 清空队列
-            qComboQueue.Clear();
-            qCurrentItem = null;
-        }
-
-        private void CancelEPendingKeys()
-        {
-            // 清空队列
-            eComboQueue.Clear();
-            eCurrentItem = null;
-        }
-
-        private void ProcessPendingSecondKey()
-        {
-            // 处理Q键队列
-            ProcessComboQueue(qComboQueue, ref qCurrentItem);
-
-            // 处理E键队列
-            ProcessComboQueue(eComboQueue, ref eCurrentItem);
-        }
-
-        private void ProcessComboQueue(Queue<ComboQueueItem> queue, ref ComboQueueItem currentItem)
-        {
-            // 如果没有当前项且队列不为空，取出下一项
-            if (currentItem == null && queue.Count > 0)
-            {
-                currentItem = queue.Dequeue();
-            }
-
-            // 如果有当前项，处理它
-            if (currentItem != null)
-            {
-                // 检查是否需要释放第一个按键并准备发送第二个按键
-                // 注意：只有当第一个按键还未释放时，才执行此检查
-                if (!currentItem.SentFirstKeyReleased && HasTickElapsed(Environment.TickCount, currentItem.DueTick))
-                {
-                    // 先释放第一个按键
-                    ReleaseInjectedKey(currentItem.FirstKey);
-                    // 设置第一个按键释放后的延迟
-                    currentItem.FirstKeyReleaseDelay = unchecked(Environment.TickCount + comboDelayBaseMilliseconds + random.Next(comboDelayVarianceMilliseconds + 1));
-                    currentItem.SentFirstKeyReleased = true;
-                    return;
-                }
-
-                // 检查是否需要发送第二个按键（在第一个按键释放延迟后）
-                if (currentItem.SentFirstKeyReleased && !currentItem.SentSecondKey && HasTickElapsed(Environment.TickCount, currentItem.FirstKeyReleaseDelay))
-                {
-                    // 发送第二个按键
-                    PressInjectedKey(currentItem.SecondKey);
-                    // 设置第二个按键的释放延迟（base + random(0~variance)，与第一个按键间隔相同）
-                    currentItem.ReleaseDueTick = unchecked(Environment.TickCount + comboDelayBaseMilliseconds + random.Next(comboDelayVarianceMilliseconds + 1));
-                    currentItem.SentSecondKey = true;
-                    return;
-                }
-
-                // 检查是否需要释放第二个按键
-                if (currentItem.SentSecondKey && HasTickElapsed(Environment.TickCount, currentItem.ReleaseDueTick))
-                {
-                    // 释放第二个按键
-                    ReleaseInjectedKey(currentItem.SecondKey);
-                    // 清除当前项，允许处理下一个
-                    currentItem = null;
+                    RegisterComboRequest(Keys.E, e.IsKeyDown);
                 }
             }
         }
 
-        private bool PressInjectedKey(Keys key)
+        private bool CheckHookTimeout(int startTime)
         {
-            int refCount;
-            if (injectedKeyRefCounts.TryGetValue(key, out refCount))
+            var elapsed = unchecked(Environment.TickCount - startTime);
+            if (elapsed > HookCallbackTimeoutMilliseconds)
             {
-                injectedKeyRefCounts[key] = refCount + 1;
+                LogDebug("hook-callback-timeout elapsed=" + elapsed + "ms");
                 return true;
             }
-
-            if (!TrySendKeyboardInput(key, false))
-            {
-                return false;
-            }
-
-            injectedKeyRefCounts[key] = 1;
-            return true;
+            return false;
         }
 
-        private void ReleaseInjectedKey(Keys key)
+        private void StateTimer_Tick(object state)
         {
-            int refCount;
-            if (!injectedKeyRefCounts.TryGetValue(key, out refCount))
+            if (isClosing || Interlocked.Exchange(ref stateTimerRunning, 1) != 0)
             {
                 return;
             }
 
-            refCount--;
-            if (refCount == 0)
+            try
             {
-                TrySendKeyboardInput(key, true);
-                injectedKeyRefCounts.Remove(key);
+                HeartbeatLog();
+                ProcessPolledHotkeys();
+                CheckAndRecoverFromHookFailure();
+
+                if (!isMappingEnabled)
+                {
+                    // LogVerbose("state-timer-disabled");
+                    return;
+                }
+
+                lock (stateSync)
+                {
+                    var pendingQ = pendingQComboCount;
+                    var pendingE = pendingEComboCount;
+                    var qCount = qComboQueue.Count;
+                    var eCount = eComboQueue.Count;
+                    var qActive = qCurrentItem != null;
+                    var eActive = eCurrentItem != null;
+                    
+                    if (pendingQ > 0 || pendingE > 0 || qCount > 0 || eCount > 0 || qActive || eActive)
+                    {
+                        LogDebug("state-timer qPending=" + pendingQ + " ePending=" + pendingE +
+                                 " qQueue=" + qCount + " eQueue=" + eCount +
+                                 " qActive=" + qActive + " eActive=" + eActive);
+                    }
+                    
+                    DrainPendingComboRequests();
+                    ProcessPendingSecondKey();
+                    CheckAndRecoverFromStuckState();
+                }
             }
-            else
+            catch (Exception ex)
             {
-                injectedKeyRefCounts[key] = refCount;
+                LogDebug("state-timer-error " + ex.GetType().Name + " " + ex.Message);
+                RunOnUiThread(() =>
+                {
+                    lock (stateSync)
+                    {
+                        ResetRuntimeState();
+                    }
+                });
+            }
+            finally
+            {
+                Interlocked.Exchange(ref stateTimerRunning, 0);
             }
         }
 
-        private void ClearInjectedKeyRefCounts()
+        private static int lastHeartbeatTick = 0;
+        private static int lastHeartbeatLogged = 0;
+        
+        private void HeartbeatLog()
         {
-            // 遍历所有注入的按键，发送释放事件
-            foreach (var key in injectedKeyRefCounts.Keys)
+            var currentTick = Environment.TickCount;
+            if (unchecked(currentTick - lastHeartbeatTick) > 10000)
             {
-                TrySendKeyboardInput(key, true);
+                lastHeartbeatTick = currentTick;
+                var lastHookTick = Interlocked.CompareExchange(ref lastHookActivityTick, 0, 0);
+                var timeSinceLastHook = unchecked(currentTick - lastHookTick);
+                if (unchecked(currentTick - lastHeartbeatLogged) > 60000)
+                {
+                    lastHeartbeatLogged = currentTick;
+                    LogDebug("heartbeat enabled=" + isMappingEnabled + " qPending=" + pendingQComboCount + 
+                             " ePending=" + pendingEComboCount + " qCurr=" + (qCurrentItem != null) +
+                             " eCurr=" + (eCurrentItem != null) + " qQueue=" + qComboQueue.Count +
+                             " eQueue=" + eComboQueue.Count + " hookTime=" + timeSinceLastHook + "ms");
+                }
             }
-            // 清空引用计数字典
-            injectedKeyRefCounts.Clear();
         }
 
-        private bool TrySendKeyboardInput(Keys key, bool keyUp)
+        private void CheckAndRecoverFromStuckState()
         {
-            ushort scanCode;
-            if (!TryGetScanCode(key, out scanCode))
-            {
-                return false;
-            }
-
-            var flags = keyUp ? KeyeventfKeyup : 0u;
-            keybd_event((byte)key, (byte)scanCode, flags, InjectionMarker);
-            return true;
-        }
-
-        private void StateTimer_Tick(object sender, EventArgs e)
-        {
-            ProcessPolledHotkeys();
-
-            if (!isMappingEnabled)
+            var currentTick = Environment.TickCount;
+            
+            bool hasActiveCombo = qCurrentItem != null || eCurrentItem != null;
+            bool hasQueuedItems = qComboQueue.Count > 0 || eComboQueue.Count > 0;
+            
+            if (hasActiveCombo || hasQueuedItems)
             {
                 return;
             }
-
-            // 状态恢复：检测物理按键是否真正被按住
-            // 当键盘钩子丢失释放事件时，强制重置状态
-            RecoverStaleKeyStates();
-
-            ProcessPendingSecondKey();
+            
+            if (unchecked(currentTick - lastActivityTick) > StateStuckTimeoutMilliseconds)
+            {
+                var lastWarning = Interlocked.Exchange(ref lastLoggedStuckWarning, currentTick);
+                if (unchecked(currentTick - lastWarning) > StateStuckTimeoutMilliseconds)
+                {
+                    LogDebug("state-check no-activity timeout=" + unchecked(currentTick - lastActivityTick) + "ms");
+                }
+            }
         }
 
-        private void RecoverStaleKeyStates()
+        private void CheckAndRecoverFromHookFailure()
         {
-            // 恢复 Q 键状态
-            // 队列机制会自动处理序列，只需重置 held 状态
-            if (qHeld && !IsPhysicalKeyDown(Keys.Q))
-            {
-                qHeld = false;
-            }
+            var currentTick = Environment.TickCount;
+            var lastHookTick = Interlocked.CompareExchange(ref lastHookActivityTick, 0, 0);
+            var timeSinceLastHook = unchecked(currentTick - lastHookTick);
 
-            // 恢复 E 键状态
-            // 队列机制会自动处理序列，只需重置 held 状态
-            if (eHeld && !IsPhysicalKeyDown(Keys.E))
+            if (timeSinceLastHook > HookTimeoutMilliseconds && hookRecoveryAttempts < MaxHookRecoveryAttempts)
             {
-                eHeld = false;
+                LogDebug("hook-check timeout=" + timeSinceLastHook + "ms attempts=" + hookRecoveryAttempts);
+                
+                try
+                {
+                    LogDebug("hook-reset attempting recovery");
+                    keyboardHook.Reset();
+                    Interlocked.Increment(ref hookRecoveryAttempts);
+                    Interlocked.Exchange(ref lastHookActivityTick, Environment.TickCount);
+                    LogDebug("hook-reset successful");
+                }
+                catch (Exception ex)
+                {
+                    LogDebug("hook-reset failed " + ex.GetType().Name + " " + ex.Message);
+                }
+            }
+            else if (timeSinceLastHook <= HookTimeoutMilliseconds && hookRecoveryAttempts > 0)
+            {
+                Interlocked.Exchange(ref hookRecoveryAttempts, 0);
+                LogDebug("hook-check recovery-reset attempts=" + hookRecoveryAttempts);
             }
         }
-
-
 
         private void ProcessPolledHotkeys()
         {
@@ -392,12 +341,15 @@ namespace Demo
             {
                 toggleHotkeyHeld = true;
                 var targetEnabled = !isMappingEnabled;
-                if (targetEnabled)
+                RunOnUiThread(() =>
                 {
-                    LoadConfiguration();
-                }
+                    if (targetEnabled)
+                    {
+                        LoadConfiguration();
+                    }
 
-                SetMappingEnabled(targetEnabled);
+                    SetMappingEnabled(targetEnabled);
+                });
             }
             else if (!toggleDown)
             {
@@ -416,10 +368,292 @@ namespace Demo
             }
         }
 
-        private bool TryGetScanCode(Keys key, out ushort scanCode)
+        private void RegisterComboRequest(Keys sourceKey, bool isKeyDown)
         {
-            scanCode = (ushort)MapVirtualKey((uint)key, MapvkVkToVsc);
-            return scanCode != 0;
+            if (!isKeyDown)
+            {
+                return;
+            }
+
+            Interlocked.Exchange(ref lastComboKeyPressTick, Environment.TickCount);
+
+            if (sourceKey == Keys.Q)
+            {
+                var pending = Interlocked.Increment(ref pendingQComboCount);
+                // LogVerbose("state Q pending=" + pending);
+                return;
+            }
+
+            if (sourceKey == Keys.E)
+            {
+                var pending = Interlocked.Increment(ref pendingEComboCount);
+                // LogVerbose("state E pending=" + pending);
+            }
+        }
+
+        private void EnqueueCombo(Keys firstKey, Keys secondKey, Queue<ComboQueueItem> queue, string sourceName)
+        {
+            var queueItem = new ComboQueueItem
+            {
+                FirstKey = firstKey,
+                SecondKey = secondKey,
+                DueTick = unchecked(Environment.TickCount + GetRandomComboDelayMilliseconds()),
+                FirstKeyReleaseDelay = 0,
+                ReleaseDueTick = 0,
+                SentFirstKeyReleased = false,
+                SentSecondKey = false
+            };
+
+            if (!PressInjectedKeyUnsafe(firstKey))
+            {
+                LogDebug("enqueue-failed " + sourceName + " first=" + firstKey);
+                ResetRuntimeStateUnsafe();
+                return;
+            }
+
+            queue.Enqueue(queueItem);
+            // LogVerbose("enqueue " + sourceName + " first=" + firstKey + " second=" + secondKey + " qCount=" + qComboQueue.Count + " eCount=" + eComboQueue.Count);
+        }
+
+        private bool PressInjectedKey(Keys key)
+        {
+            lock (stateSync)
+            {
+                return PressInjectedKeyUnsafe(key);
+            }
+        }
+
+        private bool PressInjectedKeyUnsafe(Keys key)
+        {
+            int refCount;
+            if (injectedKeyRefCounts.TryGetValue(key, out refCount))
+            {
+                injectedKeyRefCounts[key] = refCount + 1;
+                return true;
+            }
+
+            if (!TrySendKeyboardInput(key, false))
+            {
+                return false;
+            }
+
+            injectedKeyRefCounts[key] = 1;
+            // LogVerbose("press " + key + " ref=1");
+            return true;
+        }
+
+        private void ReleaseInjectedKey(Keys key)
+        {
+            lock (stateSync)
+            {
+                ReleaseInjectedKeyUnsafe(key);
+            }
+        }
+
+        private void ReleaseInjectedKeyUnsafe(Keys key)
+        {
+            int refCount;
+            if (!injectedKeyRefCounts.TryGetValue(key, out refCount))
+            {
+                return;
+            }
+
+            refCount--;
+            if (refCount == 0)
+            {
+                TrySendKeyboardInput(key, true);
+                injectedKeyRefCounts.Remove(key);
+                // LogVerbose("release " + key + " ref=0");
+            }
+            else
+            {
+                injectedKeyRefCounts[key] = refCount;
+                // LogVerbose("release-defer " + key + " ref=" + refCount);
+            }
+        }
+
+        private void ClearInjectedKeyRefCounts()
+        {
+            lock (stateSync)
+            {
+                ClearInjectedKeyRefCountsUnsafe();
+            }
+        }
+
+        private void ClearInjectedKeyRefCountsUnsafe()
+        {
+            foreach (var key in new List<Keys>(injectedKeyRefCounts.Keys))
+            {
+                TrySendKeyboardInput(key, true);
+            }
+
+            injectedKeyRefCounts.Clear();
+        }
+
+        private void CancelPendingKeys()
+        {
+            qComboQueue.Clear();
+            qCurrentItem = null;
+            eComboQueue.Clear();
+            eCurrentItem = null;
+        }
+
+        private void ResetRuntimeState()
+        {
+            lock (stateSync)
+            {
+                ResetRuntimeStateUnsafe();
+            }
+        }
+
+        private void ResetRuntimeStateUnsafe()
+        {
+            LogDebug("state-reset qCurr=" + (qCurrentItem != null ? qCurrentItem.FirstKey.ToString() : "null") +
+                     " eCurr=" + (eCurrentItem != null ? eCurrentItem.FirstKey.ToString() : "null") +
+                     " qQueue=" + qComboQueue.Count + " eQueue=" + eComboQueue.Count +
+                     " qPending=" + pendingQComboCount + " ePending=" + pendingEComboCount);
+            CancelPendingKeys();
+            Interlocked.Exchange(ref pendingQComboCount, 0);
+            Interlocked.Exchange(ref pendingEComboCount, 0);
+            ClearInjectedKeyRefCountsUnsafe();
+            qCurrentItem = null;
+            eCurrentItem = null;
+        }
+
+        private void ProcessPendingSecondKey()
+        {
+            ProcessComboQueue(qComboQueue, ref qCurrentItem, "Q");
+            ProcessComboQueue(eComboQueue, ref eCurrentItem, "E");
+        }
+
+        private void DrainPendingComboRequests()
+        {
+            var currentTick = Environment.TickCount;
+            var lastPressTick = Interlocked.CompareExchange(ref lastComboKeyPressTick, 0, 0);
+            var timeSinceLastPress = unchecked(currentTick - lastPressTick);
+
+            if (timeSinceLastPress > ComboQueueDrainTimeoutMilliseconds)
+            {
+                if (qComboQueue.Count > 0)
+                {
+                    // LogVerbose("flush Q queue=" + qComboQueue.Count);
+                    qComboQueue.Clear();
+                }
+                if (eComboQueue.Count > 0)
+                {
+                    // LogVerbose("flush E queue=" + eComboQueue.Count);
+                    eComboQueue.Clear();
+                }
+            }
+
+            var pendingQ = Interlocked.Exchange(ref pendingQComboCount, 0);
+            for (var i = 0; i < pendingQ; i++)
+            {
+                // LogVerbose("drain Q pending=" + (pendingQ - i - 1));
+                EnqueueCombo(Keys.A, Keys.S, qComboQueue, "Q");
+            }
+
+            var pendingE = Interlocked.Exchange(ref pendingEComboCount, 0);
+            for (var i = 0; i < pendingE; i++)
+            {
+                // LogVerbose("drain E pending=" + (pendingE - i - 1));
+                EnqueueCombo(Keys.D, Keys.S, eComboQueue, "E");
+            }
+        }
+
+        private void ProcessComboQueue(Queue<ComboQueueItem> queue, ref ComboQueueItem currentItem, string sourceName)
+        {
+            if (currentItem == null && queue.Count > 0)
+            {
+                currentItem = queue.Dequeue();
+            }
+
+            if (currentItem == null)
+            {
+                return;
+            }
+
+            if (!currentItem.SentFirstKeyReleased)
+            {
+                var elapsed = unchecked(Environment.TickCount - currentItem.DueTick);
+                if (elapsed >= 0)
+                {
+                    ReleaseInjectedKeyUnsafe(currentItem.FirstKey);
+                    currentItem.FirstKeyReleaseDelay = unchecked(Environment.TickCount + GetRandomComboDelayMilliseconds());
+                    currentItem.SentFirstKeyReleased = true;
+                    // LogVerbose("release-first " + sourceName + " key=" + currentItem.FirstKey);
+                }
+                else
+                {
+                    var waitMs = unchecked(0 - elapsed);
+                    if (waitMs > 100)
+                    {
+                        // LogVerbose("wait-first " + sourceName + " key=" + currentItem.FirstKey + " waitMs=" + waitMs);
+                    }
+                }
+                return;
+            }
+
+            if (currentItem.SentFirstKeyReleased && !currentItem.SentSecondKey)
+            {
+                var elapsed = unchecked(Environment.TickCount - currentItem.FirstKeyReleaseDelay);
+                if (elapsed >= 0)
+                {
+                    if (!PressInjectedKeyUnsafe(currentItem.SecondKey))
+                    {
+                        LogDebug("second-key-failed " + sourceName + " second=" + currentItem.SecondKey);
+                        ResetRuntimeStateUnsafe();
+                        return;
+                    }
+
+                    currentItem.ReleaseDueTick = unchecked(Environment.TickCount + GetRandomComboDelayMilliseconds());
+                    currentItem.SentSecondKey = true;
+                    // LogVerbose("press-second " + sourceName + " key=" + currentItem.SecondKey);
+                }
+                else
+                {
+                    var waitMs = unchecked(0 - elapsed);
+                    if (waitMs > 100)
+                    {
+                        // LogVerbose("wait-second " + sourceName + " key=" + currentItem.SecondKey + " waitMs=" + waitMs);
+                    }
+                }
+                return;
+            }
+
+            if (currentItem.SentSecondKey)
+            {
+                var elapsed = unchecked(Environment.TickCount - currentItem.ReleaseDueTick);
+                if (elapsed >= 0)
+                {
+                    ReleaseInjectedKeyUnsafe(currentItem.SecondKey);
+                    // LogVerbose("release-second " + sourceName + " key=" + currentItem.SecondKey);
+                    currentItem = null;
+                }
+                else
+                {
+                    var waitMs = unchecked(0 - elapsed);
+                    if (waitMs > 100)
+                    {
+                        // LogVerbose("wait-release " + sourceName + " key=" + currentItem.SecondKey + " waitMs=" + waitMs);
+                    }
+                }
+                return;
+            }
+        }
+
+        private bool TrySendKeyboardInput(Keys key, bool keyUp)
+        {
+            ushort scanCode;
+            if (!TryGetScanCode(key, out scanCode))
+            {
+                LogDebug("scan-code-failed key=" + key);
+                return false;
+            }
+
+            var flags = keyUp ? KeyeventfKeyup : 0u;
+            keybd_event((byte)key, (byte)scanCode, flags, InjectionMarker);
+            return true;
         }
 
         private void SetMappingEnabled(bool enabled)
@@ -435,27 +669,112 @@ namespace Demo
                 return;
             }
 
+            LogDebug("mapping-enabled " + enabled);
             isMappingEnabled = enabled;
-
-            // 无论启用还是禁用，都重置状态机
-            qHeld = false;
-            eHeld = false;
-            activeSequence.Stage = SequenceStage.Idle;
-            hookFailureLogged = false;
-
-            // 清理待发送的按键状态
-            CancelQPendingKeys();
-            CancelEPendingKeys();
-
-            // 清理引用计数，确保所有注入的按键都被释放
-            ClearInjectedKeyRefCounts();
+            toggleHotkeyHeld = false;
+            pauseHeld = false;
+            lock (stateSync)
+            {
+                ResetRuntimeState();
+            }
 
             if (enabled)
             {
                 keyboardHook.Reset();
             }
 
+            LogDebug("mapping-" + (enabled ? "enabled" : "disabled"));
             UpdateStatusLabel();
+        }
+
+        private void LogDebug(string message)
+        {
+            var line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + message;
+            lock (logSync)
+            {
+                pendingLogLines.Enqueue(line);
+            }
+
+            ScheduleLogFlush();
+        }
+
+        private void ScheduleLogFlush()
+        {
+            if (Interlocked.CompareExchange(ref logFlushScheduled, 1, 0) != 0)
+            {
+                return;
+            }
+
+            ThreadPool.QueueUserWorkItem(_ => FlushPendingLogsAsync());
+        }
+
+        private void FlushPendingLogsAsync()
+        {
+            while (true)
+            {
+                string[] linesToWrite;
+
+                lock (logSync)
+                {
+                    if (pendingLogLines.Count == 0)
+                    {
+                        Interlocked.Exchange(ref logFlushScheduled, 0);
+                        if (pendingLogLines.Count == 0)
+                        {
+                            return;
+                        }
+
+                        if (Interlocked.CompareExchange(ref logFlushScheduled, 1, 0) != 0)
+                        {
+                            return;
+                        }
+                    }
+
+                    linesToWrite = pendingLogLines.ToArray();
+                    pendingLogLines.Clear();
+                }
+
+                try
+                {
+                    File.AppendAllLines(logFilePath, linesToWrite);
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private void FlushPendingLogsSync()
+        {
+            try
+            {
+                string[] linesToWrite;
+                lock (logSync)
+                {
+                    if (pendingLogLines.Count == 0)
+                    {
+                        return;
+                    }
+
+                    linesToWrite = pendingLogLines.ToArray();
+                    pendingLogLines.Clear();
+                }
+
+                File.AppendAllLines(logFilePath, linesToWrite);
+            }
+            catch
+            {
+            }
+        }
+
+        private void LogVerbose(string message)
+        {
+            if (!verboseLoggingEnabled)
+            {
+                return;
+            }
+
+            LogDebug("verbose " + message);
         }
 
         private void UpdateStatusLabel()
@@ -531,7 +850,7 @@ namespace Demo
                 var iconHandle = bitmap.GetHicon();
                 try
                 {
-                    return Icon.FromHandle(iconHandle).Clone() as Icon;
+                    return (Icon)Icon.FromHandle(iconHandle).Clone();
                 }
                 finally
                 {
@@ -599,19 +918,17 @@ namespace Demo
 
         private void LoadConfiguration()
         {
-            // 确保托盘图标已初始化（在显示气泡提示前需要设置 Icon）
             EnsureTrayIcons();
             if (baseAppIcon != null && notifyIcon1.Icon == null)
             {
                 notifyIcon1.Icon = baseAppIcon;
             }
-            
-            // 如果 notifyIcon1.Icon 仍然为 null，创建一个简单的默认图标
+
             if (notifyIcon1.Icon == null)
             {
                 notifyIcon1.Icon = CreateDefaultIcon();
             }
-            
+
             var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ConfigurationFileName);
             if (!File.Exists(configPath))
             {
@@ -626,21 +943,28 @@ namespace Demo
             comboDelayBaseMilliseconds = config.ComboDelayBaseMilliseconds;
             comboDelayVarianceMilliseconds = config.ComboDelayVarianceMilliseconds;
             toggleHotkey = config.ToggleHotkey;
+            verboseLoggingEnabled = config.VerboseLoggingEnabled;
         }
 
         private static Icon CreateDefaultIcon()
         {
-            // 创建一个简单的默认图标（绿色圆形）
-            var bitmap = new Bitmap(16, 16);
+            using (var bitmap = new Bitmap(16, 16))
             using (var graphics = Graphics.FromImage(bitmap))
+            using (var brush = new SolidBrush(Color.Green))
             {
                 graphics.Clear(Color.Transparent);
-                using (var brush = new SolidBrush(Color.Green))
+                graphics.FillEllipse(brush, 2, 2, 12, 12);
+
+                var iconHandle = bitmap.GetHicon();
+                try
                 {
-                    graphics.FillEllipse(brush, 2, 2, 12, 12);
+                    return (Icon)Icon.FromHandle(iconHandle).Clone();
+                }
+                finally
+                {
+                    DestroyIcon(iconHandle);
                 }
             }
-            return Icon.FromHandle(bitmap.GetHicon());
         }
 
         private static Dictionary<string, string> ReadConfigurationValues(string configPath)
@@ -679,17 +1003,23 @@ namespace Demo
             config.ComboDelayBaseMilliseconds = DefaultComboDelayBaseMilliseconds;
             config.ComboDelayVarianceMilliseconds = DefaultComboDelayVarianceMilliseconds;
             config.ToggleHotkey = DefaultToggleHotkey;
+            config.VerboseLoggingEnabled = DefaultVerboseLoggingEnabled;
 
             int delayBase;
-            if (TryGetPositiveInt(values, "ComboDelayBaseMs", out delayBase))
+            if (TryGetNonNegativeInt(values, "ComboDelayBaseMs", out delayBase))
             {
                 config.ComboDelayBaseMilliseconds = delayBase;
             }
 
             int delayVariance;
-            if (TryGetPositiveInt(values, "ComboDelayVarianceMs", out delayVariance))
+            if (TryGetNonNegativeInt(values, "ComboDelayVarianceMs", out delayVariance))
             {
                 config.ComboDelayVarianceMilliseconds = delayVariance;
+            }
+
+            if (!values.ContainsKey("ComboDelayBaseMs") && !values.ContainsKey("ComboDelayVarianceMs"))
+            {
+                ApplyLegacyDelayRange(values, config);
             }
 
             Keys parsedToggleHotkey;
@@ -698,10 +1028,48 @@ namespace Demo
                 config.ToggleHotkey = parsedToggleHotkey;
             }
 
+            bool parsedVerboseLogging;
+            if (TryGetBooleanValue(values, "VerboseLogging", out parsedVerboseLogging))
+            {
+                config.VerboseLoggingEnabled = parsedVerboseLogging;
+            }
+
             return config;
         }
 
-        private static bool TryGetPositiveInt(IDictionary<string, string> values, string key, out int parsedValue)
+        private static void ApplyLegacyDelayRange(IDictionary<string, string> values, AppConfiguration config)
+        {
+            int minDelay;
+            int maxDelay;
+            var hasMin = TryGetNonNegativeInt(values, "ComboDelayMinMs", out minDelay);
+            var hasMax = TryGetNonNegativeInt(values, "ComboDelayMaxMs", out maxDelay);
+            if (!hasMin && !hasMax)
+            {
+                return;
+            }
+
+            if (!hasMin)
+            {
+                minDelay = DefaultComboDelayBaseMilliseconds;
+            }
+
+            if (!hasMax)
+            {
+                maxDelay = minDelay;
+            }
+
+            if (minDelay > maxDelay)
+            {
+                var swap = minDelay;
+                minDelay = maxDelay;
+                maxDelay = swap;
+            }
+
+            config.ComboDelayBaseMilliseconds = minDelay;
+            config.ComboDelayVarianceMilliseconds = maxDelay - minDelay;
+        }
+
+        private static bool TryGetNonNegativeInt(IDictionary<string, string> values, string key, out int parsedValue)
         {
             parsedValue = 0;
             string rawValue;
@@ -711,7 +1079,7 @@ namespace Demo
             }
 
             int candidate;
-            if (!int.TryParse(rawValue, out candidate) || candidate <= 0)
+            if (!int.TryParse(rawValue, out candidate) || candidate < 0)
             {
                 return false;
             }
@@ -732,9 +1100,37 @@ namespace Demo
             return Enum.TryParse(rawValue, true, out parsedKey) && parsedKey != Keys.None;
         }
 
-        private int GetRandomComboKeyDelayMilliseconds()
+        private static bool TryGetBooleanValue(IDictionary<string, string> values, string key, out bool parsedValue)
         {
-            // 实际延迟 = 基础固定值 + 0到浮动值之间的随机数
+            parsedValue = false;
+            string rawValue;
+            if (!values.TryGetValue(key, out rawValue))
+            {
+                return false;
+            }
+
+            if (string.Equals(rawValue, "1", StringComparison.OrdinalIgnoreCase))
+            {
+                parsedValue = true;
+                return true;
+            }
+
+            if (string.Equals(rawValue, "0", StringComparison.OrdinalIgnoreCase))
+            {
+                parsedValue = false;
+                return true;
+            }
+
+            return bool.TryParse(rawValue, out parsedValue);
+        }
+
+        private int GetRandomComboDelayMilliseconds()
+        {
+            if (comboDelayVarianceMilliseconds <= 0)
+            {
+                return comboDelayBaseMilliseconds;
+            }
+
             return comboDelayBaseMilliseconds + random.Next(comboDelayVarianceMilliseconds + 1);
         }
 
@@ -743,13 +1139,21 @@ namespace Demo
             return unchecked(currentTick - dueTick) >= 0;
         }
 
+        private bool TryGetScanCode(Keys key, out ushort scanCode)
+        {
+            scanCode = (ushort)MapVirtualKey((uint)key, MapvkVkToVsc);
+            return scanCode != 0;
+        }
+
         private const string ConfigurationFileName = "kof6key.ini";
+        private const string LogFileName = "kof6key.log";
         private const int DefaultComboDelayBaseMilliseconds = 40;
-        private const int DefaultComboDelayVarianceMilliseconds = 5;
-        private static readonly Keys DefaultToggleHotkey = Keys.Right;
+        private const int DefaultComboDelayVarianceMilliseconds = 0;
+        private const bool DefaultVerboseLoggingEnabled = false;
         private const int StateTimerIntervalMilliseconds = 1;
         private const uint KeyeventfKeyup = 0x0002;
         private const uint MapvkVkToVsc = 0;
+        private static readonly Keys DefaultToggleHotkey = Keys.Right;
         private static readonly IntPtr InjectionMarker = new IntPtr(unchecked((int)0x4B364B36));
 
         [DllImport("user32.dll")]
