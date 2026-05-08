@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -20,6 +21,8 @@ namespace Demo
             public Keys ToggleHotkey { get; set; }
 
             public bool VerboseLoggingEnabled { get; set; }
+
+            public bool EnterKeyToggle { get; set; }
         }
 
         private sealed class ComboQueueItem
@@ -53,6 +56,7 @@ namespace Demo
         private int comboDelayVarianceMilliseconds = DefaultComboDelayVarianceMilliseconds;
         private Keys toggleHotkey = DefaultToggleHotkey;
         private bool verboseLoggingEnabled;
+        private bool enterKeyToggle = true;
         private bool toggleHotkeyHeld;
         private bool pauseHeld;
         private volatile bool isMappingEnabled = true;
@@ -164,6 +168,12 @@ namespace Demo
                 return;
             }
 
+            if (e.KeyCode == Keys.Enter && e.IsKeyDown && !e.IsInjected)
+            {
+                HandleEnterKeyPress();
+                return;
+            }
+
             if (!isMappingEnabled || e.IsInjected)
             {
                 return;
@@ -190,6 +200,17 @@ namespace Demo
                     RegisterComboRequest(Keys.E, e.IsKeyDown);
                 }
             }
+        }
+
+        private void HandleEnterKeyPress()
+        {
+            if (!enterKeyToggle)
+            {
+                return;
+            }
+
+            SetMappingEnabled(!isMappingEnabled);
+            LogDebug("enter-key-press toggle " + (isMappingEnabled ? "disabled" : "enabled"));
         }
 
         private bool CheckHookTimeout(int startTime)
@@ -671,8 +692,6 @@ namespace Demo
 
             LogDebug("mapping-enabled " + enabled);
             isMappingEnabled = enabled;
-            toggleHotkeyHeld = false;
-            pauseHeld = false;
             lock (stateSync)
             {
                 ResetRuntimeState();
@@ -944,6 +963,7 @@ namespace Demo
             comboDelayVarianceMilliseconds = config.ComboDelayVarianceMilliseconds;
             toggleHotkey = config.ToggleHotkey;
             verboseLoggingEnabled = config.VerboseLoggingEnabled;
+            enterKeyToggle = config.EnterKeyToggle;
         }
 
         private static Icon CreateDefaultIcon()
@@ -1032,6 +1052,12 @@ namespace Demo
             if (TryGetBooleanValue(values, "VerboseLogging", out parsedVerboseLogging))
             {
                 config.VerboseLoggingEnabled = parsedVerboseLogging;
+            }
+
+            bool parsedEnterKeyToggle;
+            if (TryGetBooleanValue(values, "EnterKeyToggle", out parsedEnterKeyToggle))
+            {
+                config.EnterKeyToggle = parsedEnterKeyToggle;
             }
 
             return config;
@@ -1173,5 +1199,15 @@ namespace Demo
         {
             return (GetAsyncKeyState(key) & 0x8000) != 0;
         }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern int GetWindowTextLength(IntPtr hWnd);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
     }
 }
